@@ -1,0 +1,27 @@
+{
+  "name": "bharat-terminal",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Indian market research, analytics and portfolio-intelligence platform",
+  "workspaces": [
+    "backend",
+    "frontend"
+  ],
+  "scripts": {
+    "dev": "concurrently -n api,web -c cyan,magenta \"npm run dev -w backend\" \"npm run dev -w frontend\"",
+    "build": "npm run build -w backend && npm run build -w frontend",
+    "migrate": "npm run migrate -w backend",
+    "seed": "npm run seed -w backend",
+    "test": "npm run test -w backend",
+    "lint:safety": "node scripts/banned-phrases.mjs",
+    "infra:up": "docker compose -f docker/docker-compose.yml up -d",
+    "infra:down": "docker compose -f docker/docker-compose.yml down"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.0",
+    "playwright": "^1.63.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

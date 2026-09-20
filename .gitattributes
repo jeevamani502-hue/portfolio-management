@@ -1,0 +1,9 @@
+# Normalise line endings so a Windows checkout does not show every file as
+# modified. Text is stored LF in the repo and checked out per-platform.
+* text=auto eol=lf
+
+*.sh   text eol=lf
+*.bat  text eol=crlf
+*.ps1  text eol=crlf
+
+package-lock.json linguist-generated=true
