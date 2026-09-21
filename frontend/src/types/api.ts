@@ -864,3 +864,159 @@ export interface DataQualityEventDto {
   detail: Record<string, unknown>;
   occurredAt: string;
 }
+
+/** One attributed number behind an F&O setup. */
+export interface SetupEvidenceDto {
+  label: string;
+  value: string;
+  source: 'chain' | 'signal_engine' | 'calculated' | 'user_input';
+}
+
+export interface OptionSizingDto {
+  quantity: number;
+  lots: number | null;
+  actualCapitalAtRisk: number;
+  actualRiskPct: number;
+  limitedBy: string;
+  explain: string[];
+  warnings: string[];
+}
+
+/**
+ * A rule-derived option trade. `confirmation` counts agreeing conditions and
+ * is explicitly not a probability of profit — the UI must never present it
+ * as one.
+ */
+export interface OptionSetupDto {
+  action: 'BUY_CALL' | 'BUY_PUT' | 'NO_TRADE';
+  underlying: string;
+  expiry: string;
+  bias: 'BULLISH' | 'BEARISH' | 'NEUTRAL';
+  confirmation: number;
+  strike: number | null;
+  optionType: 'CE' | 'PE' | null;
+  entryPremium: number | null;
+  stopPremium: number | null;
+  targetPremium: number | null;
+  underlyingStop: number | null;
+  underlyingTarget: number | null;
+  spot: number | null;
+  lotSize: number | null;
+  delta: number | null;
+  rewardRisk: number | null;
+  sizing: OptionSizingDto | null;
+  totalPremiumAtRisk: number | null;
+  evidence: SetupEvidenceDto[];
+  warnings: string[];
+  rejectedBecause: string[];
+  interpretation: string;
+}
+
+// ── paper trading ───────────────────────────────────────────────────────────
+
+/** Numeric columns arrive as strings from pg; the UI coerces at the edge. */
+export interface PaperConfigDto {
+  user_id: string;
+  is_enabled: boolean;
+  capital: string;
+  risk_per_trade_pct: string;
+  max_open_positions: number;
+  max_trades_per_day: number;
+  max_daily_loss_pct: string;
+  min_confirmation: number;
+  underlyings: string[];
+  trade_options: boolean;
+  trade_equity: boolean;
+  halted_reason: string | null;
+  halted_at: string | null;
+}
+
+export interface PaperConfigInput {
+  isEnabled: boolean;
+  capital: number;
+  riskPerTradePct: number;
+  maxOpenPositions: number;
+  maxTradesPerDay: number;
+  maxDailyLossPct: number;
+  minConfirmation: number;
+  underlyings: string[];
+  tradeOptions: boolean;
+  tradeEquity: boolean;
+}
+
+export interface PaperPerformanceDto {
+  totalTrades: number;
+  openTrades: number;
+  closedTrades: number;
+  wins: number;
+  losses: number;
+  winRate: number | null;
+  grossPnl: number;
+  totalCosts: number;
+  netPnl: number;
+  returnPct: number | null;
+  bestTrade: number | null;
+  worstTrade: number | null;
+  avgWin: number | null;
+  avgLoss: number | null;
+  profitFactor: number | null;
+  /** Says plainly what the numbers above do and do not establish. */
+  caveat: string;
+}
+
+export interface PaperTradeDto {
+  id: string;
+  tradingsymbol: string;
+  exchange: string;
+  underlying: string | null;
+  kind: 'EQUITY' | 'OPTION';
+  side: 'BUY' | 'SELL';
+  quantity: number;
+  lot_size: number | null;
+  entry_price: string;
+  entry_at: string;
+  stop_price: string | null;
+  target_price: string | null;
+  confirmation: number | null;
+  rationale: string | null;
+  status: 'OPEN' | 'CLOSED';
+  exit_price: string | null;
+  exit_at: string | null;
+  exit_reason: string | null;
+  gross_pnl: string | null;
+  costs: string | null;
+  net_pnl: string | null;
+}
+
+export interface PaperSweepDto {
+  considered: number;
+  opened: number;
+  skipped: string[];
+}
+
+/**
+ * What the advisor would do about one open position.
+ *
+ * `reasons` carries the measured numbers behind `headline`, so the
+ * recommendation is never shown without the evidence for it.
+ */
+export interface PositionAdviceDto {
+  tradeId: string;
+  tradingsymbol: string;
+  underlying: string | null;
+  action: 'CLOSE' | 'CONSIDER_CLOSING' | 'WATCH' | 'HOLD' | 'CANNOT_ASSESS';
+  headline: string;
+  reasons: string[];
+  quantity: number;
+  entryPrice: number;
+  currentPrice: number | null;
+  unrealizedNet: number | null;
+  unrealizedPct: number | null;
+  stopPrice: number | null;
+  targetPrice: number | null;
+  progressToTarget: number | null;
+  progressToStop: number | null;
+  realizedRewardRisk: number | null;
+  daysToExpiry: number | null;
+  thesisIntact: boolean | null;
+}

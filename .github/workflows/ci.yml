@@ -1,0 +1,79 @@
+# Build, test and lint on every push.
+#
+# This is the part of the project GitHub can actually run. GitHub Pages
+# serves static files only, so it cannot host the application itself — that
+# needs Node, PostgreSQL and Redis, which is what render.yaml describes.
+#
+# The financial-safety linter runs here deliberately: guarantee-style
+# language about returns is the kind of thing that slips in during a hurried
+# edit, and failing the build is the point.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Typecheck and build both workspaces
+        run: npm run build
+
+      - name: Unit tests
+        run: npm test
+
+      - name: Financial-safety linter
+        run: npm run lint:safety
+
+  # Proves the production image builds before anyone tries to deploy it.
+  # Not pushed anywhere — Render builds its own from the same Dockerfile.
+  image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: verify
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build the image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: bharat-terminal:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Check it starts and reports unhealthy without a database
+        run: |
+          # No DATABASE_URL is supplied, so the process must fail loudly
+          # rather than start and serve broken pages. Exiting non-zero here
+          # is the correct behaviour, so the test is inverted.
+          if docker run --rm --name bt-ci -e NODE_ENV=production \
+               -e JWT_ACCESS_SECRET=$(openssl rand -base64 32) \
+               -e JWT_REFRESH_SECRET=$(openssl rand -base64 32) \
+               -e CREDENTIAL_ENC_KEY=$(openssl rand -base64 32) \
+               bharat-terminal:ci timeout 25 node dist/index.js; then
+            echo "The server started without a database. It should refuse."
+            exit 1
+          fi
+          echo "Refused to start without a database, as intended."

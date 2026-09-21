@@ -23,6 +23,7 @@ alertsRouter.use(requireAuth);
 const ALERT_KINDS = [
   'PRICE_ABOVE', 'PRICE_BELOW', 'PCT_CHANGE', 'RSI_ABOVE', 'RSI_BELOW',
   'VOLUME_MULTIPLE', 'BREAKOUT', 'SUPPORT_BROKEN', 'OI_CHANGE_PCT', 'NEWS', 'SIGNAL',
+  'SWING_SCAN', 'FNO_SETUP',
 ] as const;
 
 /** What each alert kind requires in `params`, validated per kind. */
@@ -41,7 +42,21 @@ const PARAM_SCHEMAS: Record<string, z.ZodTypeAny> = {
     setup: z.string().optional(),
     minStrength: z.number().min(0).max(100).default(60),
   }),
+  // Universe-wide: no symbol, so nothing here refers to one.
+  SWING_SCAN: z.object({
+    minStrength: z.number().min(0).max(100).default(60),
+    direction: z.enum(['LONG', 'SHORT']).optional(),
+  }),
+  // Capital is required, not defaulted: the engine will not size a position
+  // without it, and picking a number here would be inventing the user's risk.
+  FNO_SETUP: z.object({
+    underlying: z.string().min(1).max(20).default('NIFTY'),
+    capital: z.number().positive('capital is required to size the position'),
+    riskPercent: z.number().min(0.1).max(10).default(1),
+    minConfirmation: z.number().min(0).max(100).default(50),
+  }),
 };
+
 
 const createSchema = z.object({
   symbol: z.string().min(1).max(64).optional(),
@@ -55,7 +70,8 @@ const createSchema = z.object({
 });
 
 /** Kinds that operate on the market as a whole rather than one instrument. */
-const MARKET_WIDE = new Set(['NEWS']);
+/** Kinds that watch a universe rather than one instrument. */
+const MARKET_WIDE = new Set(['NEWS', 'SWING_SCAN', 'FNO_SETUP']);
 
 alertsRouter.get(
   '/',
@@ -99,6 +115,10 @@ alertsRouter.get(
   '/kinds',
   asyncHandler(async (_req, res) => {
     respond(res, [
+      { kind: 'SWING_SCAN', label: 'Any stock forms a swing setup',
+        params: ['minStrength', 'direction'], needsSymbol: false },
+      { kind: 'FNO_SETUP', label: 'An option trade becomes actionable',
+        params: ['underlying', 'capital', 'riskPercent', 'minConfirmation'], needsSymbol: false },
       { kind: 'PRICE_ABOVE', label: 'Price crosses above', params: ['threshold'], needsSymbol: true },
       { kind: 'PRICE_BELOW', label: 'Price crosses below', params: ['threshold'], needsSymbol: true },
       { kind: 'PCT_CHANGE', label: 'Day change exceeds %', params: ['threshold'], needsSymbol: true },

@@ -1,4 +1,6 @@
 import express, { type Express } from 'express';
+import { existsSync } from 'node:fs';
+import { join, resolve } from 'node:path';
 import helmet from 'helmet';
 import cors from 'cors';
 import compression from 'compression';
@@ -26,6 +28,7 @@ import { riskRouter } from './modules/risk/risk.routes.js';
 import { settingsRouter } from './modules/settings/settings.routes.js';
 import { aiRouter } from './modules/ai/ai.routes.js';
 import { alertsRouter } from './modules/alerts/alerts.routes.js';
+import { paperRouter } from './modules/paper/paper.routes.js';
 import { backtestRouter } from './modules/backtest/backtest.routes.js';
 
 export function createApp(): Express {
@@ -125,6 +128,7 @@ export function createApp(): Express {
   api.use('/auth', authRouter);
   api.use('/market', marketRouter);
   api.use('/stocks', stocksRouter);
+  api.use('/paper', paperRouter);
   api.use('/options', optionsRouter);
   api.use('/futures', optionsRouter); // futures analysis lives on the same router
   api.use('/portfolio', portfolioRouter);
@@ -147,6 +151,43 @@ export function createApp(): Express {
   });
 
   app.use('/api', api);
+
+  /*
+   * Serve the built frontend, when there is one.
+   *
+   * A single-service deployment is both cheaper and simpler than a separate
+   * static host: same origin, so no CORS to configure and no second URL to
+   * keep in step. Mounted after /api so a route can never be shadowed by a
+   * file, and the SPA fallback explicitly excludes /api — otherwise a typo'd
+   * endpoint would return index.html with a 200 and the client would try to
+   * parse HTML as JSON.
+   *
+   * In development this directory does not exist and Vite serves the app
+   * instead, so nothing here runs.
+   */
+  const webRoot = resolve(env.WEB_ROOT ?? join(process.cwd(), '..', 'frontend', 'dist'));
+  if (existsSync(join(webRoot, 'index.html'))) {
+    logger.info({ webRoot }, 'Serving the frontend build from the API process');
+
+    // Hashed assets are immutable; index.html must never be cached or a
+    // deploy leaves clients on the old bundle indefinitely.
+    app.use(
+      express.static(webRoot, {
+        index: false,
+        setHeaders: (res, path) => {
+          res.setHeader(
+            'Cache-Control',
+            path.endsWith('index.html') ? 'no-cache' : 'public, max-age=31536000, immutable',
+          );
+        },
+      }),
+    );
+
+    app.get(/^(?!\/api\/).*/, (req, res, next) => {
+      if (req.method !== 'GET') return next();
+      res.sendFile(join(webRoot, 'index.html'));
+    });
+  }
 
   app.use(notFoundHandler);
   app.use(errorHandler);

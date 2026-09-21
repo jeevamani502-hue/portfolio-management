@@ -27,6 +27,16 @@ import type {
 import { symbolKey } from '../types.js';
 import { toIst, type Timeframe } from '../../utils/time.js';
 
+/**
+ * SmartAPI's quote endpoint rejects more than 50 tokens per call with
+ * "Tokens max limit exceeded". Verified against the live API: 50 passes, 51
+ * does not. An option chain is several hundred contracts, so it must chunk.
+ */
+const MAX_QUOTE_TOKENS = 50;
+
+/** Segments this platform models; Angel One's master covers more. */
+const SUPPORTED_EXCHANGES = new Set<Exchange>(['NSE', 'BSE', 'NFO', 'BFO', 'MCX', 'CDS', 'INDICES']);
+
 const SCRIP_MASTER_URL =
   'https://margincalculator.angelbroking.com/OpenAPI_File/files/OpenAPIScripMaster.json';
 
@@ -131,7 +141,14 @@ export class AngelOneProvider extends HttpProvider implements MarketDataProvider
       },
     ],
     throttleMs: { default: 350, quote: 400, historical: 400, login: 2_000, instruments: 3600_000 },
-    notes: 'Free to use with an Angel One account. Sessions are refreshed automatically via TOTP.',
+    notes:
+      'Free to use with an Angel One account, live data and historical candles included. ' +
+      'Sessions are refreshed automatically via TOTP, so there is no daily login step. ' +
+      'When creating the app, SmartAPI demands an HTTPS Redirect URL and rejects localhost, ' +
+      'http:// and bare IPs — but it is never used here: this provider authenticates through ' +
+      'loginByPassword (client code + MPIN + TOTP), not a browser redirect. Any HTTPS URL you ' +
+      'control will do. There is no native option-chain endpoint, but chains assemble from the ' +
+      'contract master plus batched quotes, so F&O works without a second provider.',
   };
 
   constructor(creds: ProviderCredentials = {}) {
@@ -246,36 +263,61 @@ export class AngelOneProvider extends HttpProvider implements MarketDataProvider
     if (reqs.length === 0) return [];
     const headers = await this.authHeaders();
 
-    const tokensByExchange: Record<string, string[]> = {};
-    for (const r of reqs) {
-      if (!r.providerToken) {
-        throw new ProviderError(
-          'angelone',
-          `Instrument ${r.exchange}:${r.tradingsymbol} has no Angel One symbol token. Run the instruments sync.`,
-          { retryable: false },
-        );
-      }
-      const ex = EXCHANGE_MAP[r.exchange] ?? 'NSE';
-      (tokensByExchange[ex] ??= []).push(r.providerToken);
+    // A request without a token cannot be addressed. Throwing on the first one
+    // used to abort the whole batch — which is how a 664-contract option chain
+    // died on a handful of rows carried by a different provider. Skip them and
+    // price what we can; the caller renders missing legs as blank rather than
+    // losing the chain. Only a batch with nothing addressable is an error.
+    const addressable = reqs.filter((r) => r.providerToken);
+    if (addressable.length === 0) {
+      throw new ProviderError(
+        'angelone',
+        `None of the ${reqs.length} requested instruments carry an Angel One symbol token. Run the instruments sync.`,
+        { retryable: false },
+      );
     }
 
-    const res = await this.http<
-      AngelEnvelope<{ fetched?: AngelQuoteLeg[]; unfetched?: unknown[] }>
-    >('/rest/secure/angelbroking/market/v1/quote/', {
-      method: 'POST',
-      headers,
-      body: { mode: 'FULL', exchangeTokens: tokensByExchange },
-      throttleGroup: 'quote',
-    });
-
-    if (!res.status) {
-      throw new ProviderError('angelone', res.message ?? 'Quote call failed', { retryable: true });
-    }
-
-    const byToken = new Map(reqs.map((r) => [r.providerToken!, r]));
+    const byToken = new Map(addressable.map((r) => [r.providerToken!, r]));
     const out: NormalizedQuote[] = [];
 
-    for (const leg of res.data?.fetched ?? []) {
+    // SmartAPI rejects more than 50 tokens per call with "Tokens max limit
+    // exceeded" — verified empirically: 50 succeeds, 51 does not. The throttle
+    // group paces the chunks so a full chain does not trip the rate limit.
+    for (let i = 0; i < addressable.length; i += MAX_QUOTE_TOKENS) {
+      const slice = addressable.slice(i, i + MAX_QUOTE_TOKENS);
+      const tokensByExchange: Record<string, string[]> = {};
+      for (const r of slice) {
+        const ex = EXCHANGE_MAP[r.exchange] ?? 'NSE';
+        (tokensByExchange[ex] ??= []).push(r.providerToken!);
+      }
+
+      const res = await this.http<
+        AngelEnvelope<{ fetched?: AngelQuoteLeg[]; unfetched?: unknown[] }>
+      >('/rest/secure/angelbroking/market/v1/quote/', {
+        method: 'POST',
+        headers,
+        body: { mode: 'FULL', exchangeTokens: tokensByExchange },
+        throttleGroup: 'quote',
+      });
+
+      if (!res.status) {
+        throw new ProviderError('angelone', res.message ?? 'Quote call failed', {
+          retryable: true,
+        });
+      }
+      out.push(...this.mapQuoteLegs(res.data?.fetched ?? [], byToken));
+    }
+
+    return out;
+  }
+
+  /** Turn SmartAPI quote legs into normalized quotes. */
+  private mapQuoteLegs(
+    legs: AngelQuoteLeg[],
+    byToken: Map<string, QuoteRequest>,
+  ): NormalizedQuote[] {
+    const out: NormalizedQuote[] = [];
+    for (const leg of legs) {
       const ltp = num(leg.ltp);
       if (ltp === null) continue;
       const req = leg.symbolToken ? byToken.get(leg.symbolToken) : undefined;
@@ -386,58 +428,104 @@ export class AngelOneProvider extends HttpProvider implements MarketDataProvider
       return this.scripCache.rows;
     }
     // Public file, no auth required.
-    const rows = await this.http<
-      Array<{
-        token?: string;
-        symbol?: string;
-        name?: string;
-        expiry?: string;
-        strike?: string;
-        lotsize?: string;
-        instrumenttype?: string;
-        exch_seg?: string;
-        tick_size?: string;
-      }>
-    >(SCRIP_MASTER_URL, { throttleGroup: 'instruments', timeoutMs: 180_000 });
+    const rows = await this.http<AngelScripRow[]>(SCRIP_MASTER_URL, {
+      throttleGroup: 'instruments',
+      timeoutMs: 180_000,
+    });
 
-    const parsed: NormalizedInstrument[] = [];
-    for (const r of rows) {
-      const token = r.token?.trim();
-      const tradingsymbol = r.symbol?.trim().toUpperCase();
-      const exchange = r.exch_seg?.trim().toUpperCase() as Exchange | undefined;
-      if (!token || !tradingsymbol || !exchange) continue;
-
-      const it = (r.instrumenttype ?? '').toUpperCase();
-      let instrumentType: InstrumentType = 'EQ';
-      if (it.startsWith('OPT')) {
-        instrumentType = tradingsymbol.endsWith('PE') ? 'PE' : 'CE';
-      } else if (it.startsWith('FUT')) instrumentType = 'FUT';
-      else if (it === 'AMXIDX' || it === 'INDEX') instrumentType = 'INDEX';
-
-      // Angel reports strike in paise (multiplied by 100).
-      const rawStrike = num(r.strike);
-      const strike = rawStrike !== null && rawStrike > 0 ? rawStrike / 100 : null;
-
-      parsed.push({
-        exchange,
-        tradingsymbol,
-        name: r.name?.trim() ?? null,
-        isin: null,
-        segment: exchange,
-        instrumentType,
-        underlying: r.name?.trim().toUpperCase() ?? null,
-        expiry: normalizeAngelExpiry(r.expiry),
-        strike,
-        optionType: instrumentType === 'CE' || instrumentType === 'PE' ? instrumentType : null,
-        lotSize: num(r.lotsize) ?? 1,
-        tickSize: (num(r.tick_size) ?? 5) / 100,
-        providerToken: token,
-      });
-    }
-
+    const parsed = parseAngelScripMaster(rows);
     this.scripCache = { at: Date.now(), rows: parsed };
     return parsed;
   }
+}
+
+
+/** One row of Angel One's public scrip master. */
+export interface AngelScripRow {
+  token?: string;
+  symbol?: string;
+  name?: string;
+  expiry?: string;
+  strike?: string;
+  lotsize?: string;
+  instrumenttype?: string;
+  exch_seg?: string;
+  tick_size?: string;
+}
+
+/**
+ * Normalize Angel One's scrip master into this platform's instrument shape.
+ *
+ * Pure and exported so the quirks below stay pinned by tests. Every one of
+ * them was a real outage: symbols that never matched, indices filed on the
+ * wrong exchange, and single rows that aborted the entire upsert batch and
+ * left the app showing no data at all while Settings reported "connected".
+ */
+export function parseAngelScripMaster(rows: readonly AngelScripRow[]): NormalizedInstrument[] {
+  const parsed: NormalizedInstrument[] = [];
+  for (const r of rows) {
+    const token = r.token?.trim();
+    const rawSymbol = r.symbol?.trim().toUpperCase();
+    const rawExchange = r.exch_seg?.trim().toUpperCase() as Exchange | undefined;
+    if (!token || !rawSymbol || !rawExchange) continue;
+    // Angel One's master also covers NCDEX and NCO (commodity and currency
+    // segments this platform does not model). They fail the instruments
+    // exchange check constraint, and one rejected row aborts the whole
+    // batch, so drop them here rather than let them poison the sync.
+    if (!SUPPORTED_EXCHANGES.has(rawExchange)) continue;
+
+    const it = (r.instrumenttype ?? '').toUpperCase();
+    let instrumentType: InstrumentType = 'EQ';
+    if (it.startsWith('OPT')) {
+      instrumentType = rawSymbol.endsWith('PE') ? 'PE' : 'CE';
+    } else if (it.startsWith('FUT')) instrumentType = 'FUT';
+    else if (it === 'AMXIDX' || it === 'INDEX') instrumentType = 'INDEX';
+
+    // Angel One files indices under exch_seg NSE/BSE; this platform keeps
+    // them on their own pseudo-exchange, and `provider_tokens` merges on
+    // exchange + tradingsymbol. Left alone, NIFTY 50 would land on a second
+    // NSE row and the dashboard's INDICES lookup would never find the token.
+    const exchange: Exchange = instrumentType === 'INDEX' ? 'INDICES' : rawExchange;
+
+    // NSE cash symbols carry a two-or-three character series suffix —
+    // RELIANCE-EQ, IDEA-BE, SGBAUG28-SG. Every other provider, and every
+    // lookup in this codebase, uses the bare symbol. Without stripping it
+    // the token merge silently misses and Angel One can price nothing.
+    // Only the final segment goes: HCL-INSYS-EQ must become HCL-INSYS, not
+    // HCL. Derivatives (RELIANCE29SEP261170PE) carry no suffix, and BSE
+    // symbols never do, so both are left untouched.
+    const tradingsymbol =
+      rawExchange === 'NSE' && instrumentType !== 'INDEX'
+        ? rawSymbol.replace(/-[A-Z0-9]{1,3}$/, '') || rawSymbol
+        : rawSymbol;
+
+    // Angel reports strike in paise (multiplied by 100).
+    const rawStrike = num(r.strike);
+    const strike = rawStrike !== null && rawStrike > 0 ? rawStrike / 100 : null;
+
+    parsed.push({
+      exchange,
+      tradingsymbol,
+      name: r.name?.trim() ?? null,
+      isin: null,
+      segment: exchange,
+      instrumentType,
+      underlying: r.name?.trim().toUpperCase() ?? null,
+      expiry: normalizeAngelExpiry(r.expiry),
+      strike,
+      optionType: instrumentType === 'CE' || instrumentType === 'PE' ? instrumentType : null,
+      // Angel One ships 0 (and occasionally -1) as the lot size for rows
+      // that do not trade in lots — indices above all. The schema requires
+      // lot_size > 0, so an unclamped 0 aborts the entire upsert batch and
+      // the whole master fails to sync on one bad row. 1 is the honest
+      // value for a non-lot instrument.
+      lotSize: Math.max(1, Math.trunc(num(r.lotsize) ?? 1)),
+      // Same reasoning: a 0 tick would corrupt price rounding downstream.
+      tickSize: Math.max(0.01, (num(r.tick_size) || 5) / 100),
+      providerToken: token,
+    });
+  }
+  return parsed;
 }
 
 const MONTHS: Record<string, string> = {

@@ -7,6 +7,10 @@ import * as instrumentsRepo from '../../db/repositories/instruments.js';
 import { getQuote, getCandles } from '../../modules/market/marketData.service.js';
 import { buildSnapshot } from '../../analysis/snapshot.js';
 import { runSignalEngine } from '../../analysis/signals/engine.js';
+import { buildOptionSetup } from '../../analysis/options/setupEngine.js';
+import {
+  getExpiries, getOptionChain, underlyingInstrumentFor,
+} from '../../modules/options/options.service.js';
 import { pushToUser } from '../../websocket/server.js';
 
 const log = logger.child({ job: 'alert-evaluator' });
@@ -86,6 +90,11 @@ export async function evaluateAlerts(_registry: ProviderRegistry): Promise<void>
 }
 
 async function evaluateOne(alert: AlertRow): Promise<Evaluation> {
+  // Two kinds watch a whole universe rather than one instrument, so they are
+  // handled before the "needs an instrument" guard below.
+  if (alert.kind === 'SWING_SCAN') return evaluateSwingScan(alert);
+  if (alert.kind === 'FNO_SETUP') return evaluateFnoSetup(alert);
+
   if (alert.instrument_id === null) return { skipped: true, reason: 'no instrument attached' };
 
   const instrument = await instrumentsRepo.getById(alert.instrument_id);
@@ -207,6 +216,135 @@ async function evaluateOne(alert: AlertRow): Promise<Evaluation> {
     default:
       return { skipped: true, reason: `kind ${alert.kind} is not evaluated by this worker yet` };
   }
+}
+
+
+// ── universe-wide kinds ─────────────────────────────────────────────────────
+
+/**
+ * Fire when the scanner has persisted a setup the user has not been told
+ * about yet.
+ *
+ * It reads `trade_ideas` rather than re-running the sweep: the scanner job
+ * already did that work for every user, and repeating it per alert would
+ * multiply provider calls by the number of subscribers for an identical
+ * answer.
+ */
+async function evaluateSwingScan(alert: AlertRow): Promise<Evaluation> {
+  const minStrength = Number(alert.params['minStrength'] ?? 60);
+  const wantedDirection = alert.params['direction'] as string | undefined;
+
+  // Only ideas generated since the last firing, so the same setup is not
+  // reported every cycle for as long as it remains valid.
+  const since = alert.last_fired_at ?? new Date(Date.now() - 24 * 3600_000);
+
+  const rows = await queryRows<{
+    tradingsymbol: string; exchange: string; direction: string;
+    setup: string; confidence: number; entry_low: string | null;
+    invalidation: string | null; target1: string | null; generated_at: Date;
+  }>(
+    `SELECT i.tradingsymbol, i.exchange, t.direction, t.setup, t.confidence,
+            t.entry_low, t.invalidation, t.target1, t.generated_at
+       FROM trade_ideas t
+       JOIN instruments i ON i.id = t.instrument_id
+      WHERE t.generated_at > $1
+        AND t.confidence >= $2
+        AND ($3::text IS NULL OR t.direction = $3)
+      ORDER BY t.confidence DESC
+      LIMIT 5`,
+    [since, minStrength, wantedDirection ?? null],
+  );
+
+  if (rows.length === 0) return { fired: false };
+
+  const top = rows[0]!;
+  const others = rows.length > 1 ? ` (+${rows.length - 1} more)` : '';
+  return {
+    fired: true,
+    observed: {
+      matches: rows.length,
+      symbols: rows.map((r) => r.tradingsymbol),
+      top: {
+        symbol: top.tradingsymbol, setup: top.setup,
+        direction: top.direction, confidence: top.confidence,
+        entry: top.entry_low, invalidation: top.invalidation, target: top.target1,
+      },
+      source: 'scanner-sweep',
+      asOf: top.generated_at.toISOString(),
+    },
+    message:
+      `${top.tradingsymbol}: ${top.setup} ${top.direction.toLowerCase()} at ` +
+      `${top.confidence}/100 confirmation${others}. ` +
+      `Entry ${top.entry_low ?? '—'}, invalidation ${top.invalidation ?? '—'}. ` +
+      'Confirmation counts agreeing rules, not a chance of profit.',
+  };
+}
+
+/**
+ * Fire when the F&O engine produces an actionable option trade.
+ *
+ * Capital is read from the alert's own params because the engine refuses to
+ * size a position without it — there is no sensible default for how much of
+ * someone's money is at stake.
+ */
+async function evaluateFnoSetup(alert: AlertRow): Promise<Evaluation> {
+  const underlying = String(alert.params['underlying'] ?? 'NIFTY').toUpperCase();
+  const capital = Number(alert.params['capital'] ?? 0);
+  const riskPercent = Number(alert.params['riskPercent'] ?? 1);
+  const minConfirmation = Number(alert.params['minConfirmation'] ?? 50);
+
+  if (!(capital > 0)) {
+    return { skipped: true, reason: 'no capital set on this alert, so no position can be sized' };
+  }
+
+  const registry = await registryForUser(alert.user_id);
+  const expiries = await getExpiries(registry, underlying);
+  if (!isAvailable(expiries) || expiries.value.length === 0) {
+    return { skipped: true, reason: `no expiries listed for ${underlying}` };
+  }
+  const expiry = expiries.value[0]!;
+
+  const chain = await getOptionChain(registry, underlying, expiry);
+  if (!isAvailable(chain)) {
+    return { skipped: true, reason: chain.detail ?? 'option chain unavailable' };
+  }
+
+  const instrument = await instrumentsRepo.resolveSymbol(underlyingInstrumentFor(underlying));
+  if (!instrument) return { skipped: true, reason: `underlying for ${underlying} not in the master` };
+
+  const candles = await getCandles(registry, instrument, alert.timeframe as never, { bars: 300 });
+  if (candles.candles.length < 30) {
+    return { skipped: true, reason: `only ${candles.candles.length} bars for ${underlying}` };
+  }
+  const snapshot = buildSnapshot(instrument.tradingsymbol, alert.timeframe as never, candles.candles);
+
+  const setup = buildOptionSetup({
+    underlying, chain: chain.value, signal: runSignalEngine(snapshot),
+    atr: snapshot.volatility.atr14, capital, riskPercent,
+  });
+
+  // A refusal is the engine working; it is not something to wake someone for.
+  if (setup.action === 'NO_TRADE') return { fired: false };
+  if (setup.confirmation < minConfirmation) return { fired: false };
+
+  return {
+    fired: true,
+    observed: {
+      action: setup.action, strike: setup.strike, optionType: setup.optionType,
+      entryPremium: setup.entryPremium, lots: setup.sizing?.lots,
+      premiumOutlay: setup.totalPremiumAtRisk, confirmation: setup.confirmation,
+      underlyingStop: setup.underlyingStop, warnings: setup.warnings,
+      source: chain.source, asOf: chain.asOf,
+    },
+    message:
+      `${underlying} ${setup.strike} ${setup.optionType}: ` +
+      `${setup.action === 'BUY_CALL' ? 'buy call' : 'buy put'} near ` +
+      `₹${setup.entryPremium?.toFixed(2)}, ${setup.sizing?.lots} lot(s), ` +
+      `₹${setup.totalPremiumAtRisk?.toFixed(0)} premium at risk. ` +
+      `Exit if ${underlying} trades through ${setup.underlyingStop?.toFixed(0)}. ` +
+      `${setup.confirmation}/100 conditions agree — not a chance of profit.` +
+      (setup.warnings.length > 0 ? ` Caution: ${setup.warnings[0]}` : ''),
+  };
 }
 
 async function recordFiring(

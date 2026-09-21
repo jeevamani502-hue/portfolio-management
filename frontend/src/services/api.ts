@@ -229,6 +229,46 @@ export const api = {
         query: expiry ? { expiry } : {},
       }),
     futures: (symbol: string) => request<Sourced<FuturesDto[]>>(`/options/${symbol}/futures`),
+    /**
+     * Capital and risk are required by the server — it will not assume an
+     * amount, so the caller must always supply what the user typed.
+     */
+    setup: (
+      symbol: string,
+      params: { capital: number; riskPercent: number; expiry?: string; timeframe?: string },
+    ) =>
+      requestWithMeta<Sourced<OptionSetupDto>>(`/options/${symbol}/setup`, {
+        query: {
+          capital: String(params.capital),
+          riskPercent: String(params.riskPercent),
+          ...(params.expiry ? { expiry: params.expiry } : {}),
+          ...(params.timeframe ? { timeframe: params.timeframe } : {}),
+        },
+      }),
+  },
+
+  paper: {
+    config: () => request<PaperConfigDto | null>('/paper/config'),
+    saveConfig: (body: Partial<PaperConfigInput>) =>
+      request<PaperConfigDto>('/paper/config', { method: 'PUT', body }),
+    performance: () => request<PaperPerformanceDto>('/paper/performance'),
+    trades: (params: { status?: 'OPEN' | 'CLOSED'; limit?: number } = {}) =>
+      request<PaperTradeDto[]>('/paper/trades', {
+        query: {
+          ...(params.status ? { status: params.status } : {}),
+          ...(params.limit ? { limit: String(params.limit) } : {}),
+        },
+      }),
+    sweep: () => request<{ entries: PaperSweepDto; exits: { checked: number; closed: number } }>(
+      '/paper/sweep', { method: 'POST' },
+    ),
+    close: (id: string) =>
+      request<{ closed: boolean }>(`/paper/trades/${id}/close`, { method: 'POST' }),
+    advice: () => request<PositionAdviceDto[]>('/paper/advice'),
+    take: (underlying: string) =>
+      request<{ opened: boolean; underlying: string }>('/paper/take', {
+        method: 'POST', body: { underlying },
+      }),
   },
 
   scanner: {
@@ -325,7 +365,9 @@ export type * from '@/types/api';
 import type {
   AuthUserDto, MarketStatusDto, IndexDto, BreadthDto, SectorDto, MoverDto, RegimeDto,
   QuoteDto, InstrumentDto, CandleDto, StockAnalysisDto, FundamentalsDto, NewsDto,
-  PeersDto, OptionChainDto, OptionAnalyticsDto, FuturesDto, ScanResultDto, PortfolioDto,
+  PeersDto, OptionChainDto, OptionAnalyticsDto, OptionSetupDto, FuturesDto, ScanResultDto, PortfolioDto,
+  PaperConfigDto, PaperConfigInput, PaperPerformanceDto, PaperTradeDto, PaperSweepDto,
+  PositionAdviceDto,
   HealthDto, HoldingDto, PortfolioAnalysisDto, WatchlistDto, WatchlistRowDto,
   NewsImpactDto, PositionSizeDto, AnalystResponseDto, AlertDto, AlertKindDto,
   StrategyDto, BacktestRunDto, SettingsDto, ProviderCatalogueDto, ConfiguredProviderDto,

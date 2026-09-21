@@ -10,7 +10,8 @@
  *     does not serve natively (4h, 1w, 1M)
  */
 import { getJson, setJson, redis } from '../../cache/redis.js';
-import { K, TTL } from '../../cache/keys.js';
+import { scopedKey, K, TTL } from '../../cache/keys.js';
+import { env } from '../../config/env.js';
 import { query, queryRows, type QueryParam } from '../../db/pool.js';
 import { logger } from '../../utils/logger.js';
 import {
@@ -93,9 +94,18 @@ export async function cacheQuote(
   instrumentId: number,
   quote: NormalizedQuote,
   source: string,
+  /**
+   * Whose broker session produced this price. Caching without it lets the
+   * next user read a feed they are not entitled to — see `scopedKey`.
+   */
+  userId: string | null = null,
 ): Promise<void> {
   const payload: CachedQuote = { ...quote, _source: source, _cachedAt: new Date().toISOString() };
-  await setJson(K.quote(instrumentId), payload, TTL.quote);
+  await setJson(
+    scopedKey(K.quote(instrumentId), userId, env.SHARED_FEED_LICENSED),
+    payload,
+    TTL.quote,
+  );
 }
 
 /** Persist the latest quote for cold-start reads and EOD reconciliation. */
@@ -152,7 +162,9 @@ export async function getQuote(
   const status = await marketStatus();
 
   if (allowCache) {
-    const hit = await getJson<CachedQuote>(K.quote(instrument.id));
+    const hit = await getJson<CachedQuote>(
+      scopedKey(K.quote(instrument.id), registry.userId, env.SHARED_FEED_LICENSED),
+    );
     if (hit) {
       return sourced(hit, {
         source: hit._source,
@@ -189,7 +201,7 @@ export async function getQuote(
     }
 
     await Promise.all([
-      cacheQuote(instrument.id, value, provider),
+      cacheQuote(instrument.id, value, provider, registry.userId),
       persistQuote(instrument.id, value, provider),
     ]);
 
@@ -285,7 +297,9 @@ export async function getQuotes(
   const status = await marketStatus();
   const misses: InstrumentRow[] = [];
 
-  const cachedRaw = await redis.mget(rows.map((r) => K.quote(r.id)));
+  const cachedRaw = await redis.mget(
+    rows.map((r) => scopedKey(K.quote(r.id), registry.userId, env.SHARED_FEED_LICENSED)),
+  );
   rows.forEach((row, i) => {
     const raw = cachedRaw[i];
     if (!raw) { misses.push(row); return; }
@@ -337,7 +351,10 @@ export async function getQuotes(
             `Quote for ${row.tradingsymbol} failed validation and was discarded.`));
           return;
         }
-        await Promise.all([cacheQuote(row.id, q, provider), persistQuote(row.id, q, provider)]);
+        await Promise.all([
+          cacheQuote(row.id, q, provider, registry.userId),
+          persistQuote(row.id, q, provider),
+        ]);
         out.set(row.id, sourced(q, {
           source: provider,
           asOf: q.timestamp,

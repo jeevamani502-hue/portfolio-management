@@ -1,0 +1,153 @@
+# Render blueprint — deploys the API (serving the frontend), the background
+# worker, PostgreSQL and Redis from this repository.
+#
+# To use it: push this repo to GitHub, then on render.com choose
+# New → Blueprint and point it at the repo. Render reads this file and
+# creates everything below.
+#
+# Read before deploying
+# --------------------
+# This puts a login page for an application holding your brokerage
+# credentials on the public internet. Anything behind that login can reach
+# your broker account with whatever scopes your API key carries. Use a strong
+# password, and prefer a broker key with read-only permissions if your broker
+# offers one.
+#
+# Costs: the free PostgreSQL instance expires after 30 days and the free web
+# service sleeps when idle (so the first request after a pause is slow, and
+# the background worker does not run at all while it sleeps). For anything
+# you rely on, both need a paid tier.
+
+services:
+  - type: web
+    name: bharat-terminal
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: starter
+    region: singapore # Closest Render region to NSE/BSE; keeps latency sane.
+    healthCheckPath: /health
+    autoDeploy: false # Deploy deliberately, not on every push to main.
+    # Runs once per deploy, before the new version takes traffic. Only the
+    # web service does this — running it on the worker too would race two
+    # migrators against the same database.
+    preDeployCommand: node dist/db/migrate.js up
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 4000
+      - key: LOG_LEVEL
+        value: info
+
+      # Generated once by Render and then held constant. CREDENTIAL_ENC_KEY
+      # especially: change it and every stored broker credential becomes
+      # undecryptable and must be re-entered.
+      - key: JWT_ACCESS_SECRET
+        generateValue: true
+      - key: JWT_REFRESH_SECRET
+        generateValue: true
+      - key: CREDENTIAL_ENC_KEY
+        generateValue: true
+
+      - fromDatabase:
+          name: bharat-db
+          property: connectionString
+        key: DATABASE_URL
+      - key: REDIS_URL
+        fromService:
+          type: redis
+          name: bharat-redis
+          property: connectionString
+
+      # TimescaleDB is not available on Render's managed Postgres; the
+      # migrations detect its absence and fall back to plain tables.
+      - key: TIMESCALE_ENABLED
+        value: false
+      # A real Redis is present, so the in-process substitute must stay off.
+      # The server refuses to start with it under NODE_ENV=production anyway.
+      - key: USE_IN_MEMORY_REDIS
+        value: false
+
+      # Same origin — the API serves the frontend — so this is its own URL.
+      - key: FRONTEND_ORIGIN
+        fromService:
+          type: web
+          name: bharat-terminal
+          property: host
+
+      # Broker credentials are NOT set here. They are entered in the app and
+      # stored AES-256-GCM encrypted, and anything saved there replaces an
+      # environment value outright.
+      - key: PRIMARY_PROVIDER
+        value: angelone
+      - key: SHARED_FEED_LICENSED
+        value: false
+
+      # Optional. Set in the Render dashboard if you want the AI analyst.
+      - key: AI_ENABLED
+        value: false
+      - key: ANTHROPIC_API_KEY
+        sync: false
+
+      - key: RSS_FEEDS
+        value: https://www.business-standard.com/rss/markets-106.rss,https://www.livemint.com/rss/markets,https://www.moneycontrol.com/rss/marketreports.xml
+
+  - type: worker
+    name: bharat-worker
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerCommand: node dist/workers/index.js
+    plan: starter
+    region: singapore
+    autoDeploy: false
+    envVars:
+      # The worker needs the same database, cache and secrets as the API.
+      # CREDENTIAL_ENC_KEY in particular: without the identical key it cannot
+      # decrypt the stored broker credentials and every job silently no-ops.
+      - key: NODE_ENV
+        value: production
+      - fromDatabase:
+          name: bharat-db
+          property: connectionString
+        key: DATABASE_URL
+      - key: REDIS_URL
+        fromService:
+          type: redis
+          name: bharat-redis
+          property: connectionString
+      - key: CREDENTIAL_ENC_KEY
+        fromService:
+          type: web
+          name: bharat-terminal
+          envVarKey: CREDENTIAL_ENC_KEY
+      - key: JWT_ACCESS_SECRET
+        fromService:
+          type: web
+          name: bharat-terminal
+          envVarKey: JWT_ACCESS_SECRET
+      - key: JWT_REFRESH_SECRET
+        fromService:
+          type: web
+          name: bharat-terminal
+          envVarKey: JWT_REFRESH_SECRET
+      - key: TIMESCALE_ENABLED
+        value: false
+      - key: USE_IN_MEMORY_REDIS
+        value: false
+      - key: PRIMARY_PROVIDER
+        value: angelone
+      - key: RSS_FEEDS
+        value: https://www.business-standard.com/rss/markets-106.rss,https://www.livemint.com/rss/markets,https://www.moneycontrol.com/rss/marketreports.xml
+
+databases:
+  - name: bharat-db
+    databaseName: market_ai
+    user: market
+    plan: basic-256mb
+    region: singapore
+
+  - name: bharat-redis
+    type: redis
+    plan: starter
+    region: singapore
+    ipAllowList: [] # Reachable only from inside this Render account.

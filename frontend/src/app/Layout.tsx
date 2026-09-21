@@ -7,7 +7,8 @@ import { NavLink, Outlet, useNavigate } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import {
   LayoutDashboard, TrendingUp, LineChart, Layers, Radar, Briefcase, Eye,
-  Newspaper, Bell, FlaskConical, Bot, Settings as SettingsIcon, LogOut,
+  Newspaper, Bell, FlaskConical,
+  ClipboardList, Bot, Settings as SettingsIcon, LogOut,
   Menu, X, Search, Sun, Moon, Wifi, WifiOff,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
@@ -27,6 +28,7 @@ const NAV = [
   { to: '/watchlist', label: 'Watchlist', icon: Eye },
   { to: '/news', label: 'News', icon: Newspaper },
   { to: '/alerts', label: 'Alerts', icon: Bell },
+  { to: '/paper', label: 'Paper Trading', icon: ClipboardList },
   { to: '/backtest', label: 'Backtesting', icon: FlaskConical },
   { to: '/analyst', label: 'AI Analyst', icon: Bot },
   { to: '/settings', label: 'Settings', icon: SettingsIcon },

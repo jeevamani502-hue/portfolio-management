@@ -12,7 +12,8 @@
  * normalized chain, so the analytics are identical regardless of source.
  */
 import { getJson, setJson } from '../../cache/redis.js';
-import { K, TTL } from '../../cache/keys.js';
+import { scopedKey, K, TTL } from '../../cache/keys.js';
+import { env } from '../../config/env.js';
 import { query, queryRows } from '../../db/pool.js';
 import { sourced, unavailable, type Sourced } from '../../utils/sourced.js';
 import { logger } from '../../utils/logger.js';
@@ -41,6 +42,19 @@ const INDEX_UNDERLYINGS: Record<string, { dhanScrip: string; displayName: string
 export const isIndexUnderlying = (s: string): boolean =>
   Object.hasOwn(INDEX_UNDERLYINGS, s.toUpperCase());
 
+/**
+ * The instrument whose price drives an option chain.
+ *
+ * Index options are written on the index, which this platform stores under a
+ * different symbol from the F&O root: BANKNIFTY options track "NIFTY BANK".
+ * Stock options simply track the NSE cash scrip.
+ */
+export function underlyingInstrumentFor(underlying: string): string {
+  const sym = underlying.toUpperCase();
+  const idx = INDEX_UNDERLYINGS[sym];
+  return idx ? `INDICES:${idx.displayName}` : `NSE:${sym}`;
+}
+
 // ── expiries ────────────────────────────────────────────────────────────────
 
 export async function getExpiries(
@@ -48,7 +62,7 @@ export async function getExpiries(
   underlying: string,
 ): Promise<Sourced<string[]>> {
   const sym = underlying.toUpperCase();
-  const cacheKey = K.optionExpiries(sym);
+  const cacheKey = scopedKey(K.optionExpiries(sym), registry.userId, env.SHARED_FEED_LICENSED);
   const cached = await getJson<{ list: string[]; asOf: string; source: string }>(cacheKey);
   if (cached) {
     return sourced(cached.list, {
@@ -96,7 +110,7 @@ export async function getOptionChain(
   expiry: string,
 ): Promise<Sourced<NormalizedOptionChain>> {
   const sym = underlying.toUpperCase();
-  const cacheKey = K.optionChain(sym, expiry);
+  const cacheKey = scopedKey(K.optionChain(sym, expiry), registry.userId, env.SHARED_FEED_LICENSED);
   const status = await marketStatus();
 
   const cached = await getJson<{ chain: NormalizedOptionChain; source: string }>(cacheKey);

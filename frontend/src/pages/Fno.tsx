@@ -9,13 +9,17 @@ import { DataValue, Metric, SourceLine } from '@/components/market/DataValue';
 import { num, count, countCompact, signed, pct, directionClass, humanise } from '@/lib/format';
 import { cn } from '@/lib/utils';
 import type { OptionStrikeDto, OptionChainDto } from '@/types/api';
+import { TradeSetupPanel } from '@/components/fno/TradeSetupPanel';
 
 const UNDERLYINGS = ['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY'] as const;
 
 export function Fno() {
   const [underlying, setUnderlying] = useState<string>('NIFTY');
   const [expiry, setExpiry] = useState<string>('');
-  const [tab, setTab] = useState('chain');
+  // Trade setup first: it is what most visits to this page are for, and
+  // defaulting to the chain hid the one-click entry behind a tab nobody
+  // thought to click.
+  const [tab, setTab] = useState('setup');
 
   const expiries = useQuery({
     queryKey: ['options', underlying, 'expiries'],
@@ -146,12 +150,17 @@ export function Fno() {
         active={tab}
         onChange={setTab}
         tabs={[
+          { id: 'setup', label: 'Trade setup' },
           { id: 'chain', label: 'Option chain' },
           { id: 'levels', label: 'OI levels' },
           { id: 'greeks', label: 'Greeks' },
           { id: 'futures', label: 'Futures' },
         ]}
       />
+
+      {tab === 'setup' && (
+        <TradeSetupPanel underlying={underlying} expiry={activeExpiry} />
+      )}
 
       {tab === 'chain' && (
         <Card>

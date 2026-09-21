@@ -14,7 +14,7 @@ import { logger } from '../utils/logger.js';
 import { pingDb, closeDb, query } from '../db/pool.js';
 import { pingRedis, closeRedis, acquireLock, renewLock, releaseLock } from '../cache/redis.js';
 import { K } from '../cache/keys.js';
-import { getRegistry } from '../providers/registry.js';
+import { getWorkerRegistry } from '../providers/registry.js';
 import { getMarketStatus, toIst, formatIstDateTime } from '../utils/time.js';
 import { randomUUID } from 'node:crypto';
 
@@ -25,6 +25,7 @@ import { pollOptionChains } from './jobs/optionChainPoller.js';
 import { evaluateAlerts } from './jobs/alertEvaluator.js';
 import { snapshotPortfolios } from './jobs/portfolioValuation.js';
 import { refreshBreadth } from './jobs/breadthRefresh.js';
+import { sweepPaperTrading } from './jobs/paperSweep.js';
 
 const log = logger.child({ process: 'worker' });
 
@@ -44,31 +45,43 @@ const JOBS: Job[] = [
     name: 'instruments-sync',
     everyMs: 12 * 3600_000,
     runOnStart: true,
-    run: async () => { await syncInstruments(getRegistry()); },
+    run: async () => { await syncInstruments(await getWorkerRegistry()); },
+  },
+  {
+    // Paper trading needs to react while the session is open; every few
+    // minutes is enough for daily-timeframe setups and keeps provider calls
+    // proportionate to the number of open positions.
+    name: 'paper-sweep',
+    everyMs: 180_000,
+    marketHoursOnly: true,
+    runOnStart: true,
+    run: async () => { await sweepPaperTrading(); },
   },
   {
     name: 'breadth-refresh',
     everyMs: 60_000,
     marketHoursOnly: true,
-    run: async () => { await refreshBreadth(getRegistry()); },
+    runOnStart: true,
+    run: async () => { await refreshBreadth(await getWorkerRegistry()); },
   },
   {
     name: 'option-chain-poller',
     everyMs: 180_000,
     marketHoursOnly: true,
-    run: async () => { await pollOptionChains(getRegistry()); },
+    run: async () => { await pollOptionChains(await getWorkerRegistry()); },
   },
   {
     name: 'scanner-sweep',
     everyMs: 300_000,
     marketHoursOnly: true,
-    run: async () => { await sweepScanner(getRegistry()); },
+    runOnStart: true,
+    run: async () => { await sweepScanner(await getWorkerRegistry()); },
   },
   {
     name: 'alert-evaluator',
     everyMs: 30_000,
     marketHoursOnly: true,
-    run: async () => { await evaluateAlerts(getRegistry()); },
+    run: async () => { await evaluateAlerts(await getWorkerRegistry()); },
   },
   {
     name: 'news-poller',
@@ -79,12 +92,14 @@ const JOBS: Job[] = [
   {
     name: 'portfolio-valuation',
     everyMs: 3600_000,
-    run: async () => { await snapshotPortfolios(getRegistry()); },
+    run: async () => { await snapshotPortfolios(await getWorkerRegistry()); },
   },
 ];
 
 /** Prevents a slow run from overlapping with its own next tick. */
 const running = new Set<string>();
+/** Market-hours jobs that have had their single closed-market pass. */
+const ranWhileClosed = new Set<string>();
 
 async function runJob(job: Job): Promise<void> {
   if (running.has(job.name)) {
@@ -94,7 +109,18 @@ async function runJob(job: Job): Promise<void> {
 
   if (job.marketHoursOnly) {
     const status = getMarketStatus();
-    if (!status.isSessionActive) return;
+    if (!status.isSessionActive) {
+      // Skipping outright meant that over a weekend — or any evening — the
+      // breadth, scanner and movers panels had nothing to show and the whole
+      // app looked broken, even with a healthy provider. Prices do not move
+      // while the market is shut, so one pass is enough: it fills the panels
+      // from the last close and then stops until the session reopens.
+      if (ranWhileClosed.has(job.name)) return;
+      ranWhileClosed.add(job.name);
+      log.info({ job: job.name }, 'Market closed — running once so panels reflect the last close');
+    } else {
+      ranWhileClosed.delete(job.name);
+    }
   }
 
   running.add(job.name);
@@ -139,7 +165,7 @@ async function maintainLeadership(): Promise<void> {
     // a provider with `streamTicks` is configured. None of the shipped
     // adapters implement the binary socket yet (see README, Roadmap phase 3),
     // so we hold the lock and log rather than pretending to stream.
-    const streamCapable = getRegistry()
+    const streamCapable = (await getWorkerRegistry())
       .all()
       .filter((p) => p.isConfigured() && p.manifest.capabilities.includes('streamTicks'));
     if (streamCapable.length === 0) {
@@ -164,7 +190,7 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  const configured = getRegistry().all().filter((p) => p.isConfigured());
+  const configured = (await getWorkerRegistry()).all().filter((p) => p.isConfigured());
   if (configured.length === 0) {
     log.warn(
       'No market-data provider is configured. Scheduled market jobs will run and report honestly that no data could be sourced.',

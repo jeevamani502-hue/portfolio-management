@@ -67,6 +67,18 @@ export interface ProviderHealth {
 }
 
 export class ProviderRegistry {
+  /**
+   * Whose broker session this registry speaks for.
+   *
+   * Market-data caches are keyed with it unless the operator has declared a
+   * shared-feed licence. Without that, one user's licensed broker data would
+   * be served from cache to another user who has no entitlement to it — which
+   * is redistribution, and the thing `SHARED_FEED_LICENSED=false` is meant to
+   * prevent. Null means the environment-credential registry, which has no
+   * user and is shared by definition.
+   */
+  userId: string | null = null;
+
   private providers = new Map<ProviderId, MarketDataProvider>();
   /** Explicit priority order; lower is tried first. */
   private priority = new Map<ProviderId, number>();
@@ -309,12 +321,22 @@ function envCredentials(id: ProviderId): ProviderCredentials {
  * by `registryForUser`, which is what request handlers use. The env-level
  * registry exists for background workers, which have no user context.
  */
-export function buildRegistry(overrides?: Partial<Record<ProviderId, ProviderCredentials>>): ProviderRegistry {
+export function buildRegistry(
+  overrides?: Partial<Record<ProviderId, ProviderCredentials>>,
+  /**
+   * Preferred try-order. Supplied by `registryForUser` from the priority the
+   * user set in Settings; without it the environment decides. Before this
+   * existed the stored priority was read and then dropped on the floor, so
+   * reordering providers in the UI did nothing and a broken PRIMARY_PROVIDER
+   * was tried first on every single call.
+   */
+  preferredOrder?: readonly ProviderId[],
+): ProviderRegistry {
   const registry = new ProviderRegistry();
-  const order: ProviderId[] = [
-    env.PRIMARY_PROVIDER,
-    ...(env.FAILOVER_PROVIDERS as ProviderId[]),
-  ];
+  const order: ProviderId[] =
+    preferredOrder && preferredOrder.length > 0
+      ? [...preferredOrder]
+      : [env.PRIMARY_PROVIDER, ...(env.FAILOVER_PROVIDERS as ProviderId[])];
 
   let priority = 0;
   const seen = new Set<ProviderId>();
@@ -383,13 +405,84 @@ export async function registryForUser(userId: string): Promise<ProviderRegistry>
     }
   }
 
-  const registry = buildRegistry(overrides);
+  // `rows` is already ordered by the priority the user set in Settings, so it
+  // is also the order the registry should try them in.
+  const registry = buildRegistry(
+    overrides,
+    rows.filter((r) => overrides[r.provider]).map((r) => r.provider),
+  );
+  registry.userId = userId;
   userRegistryCache.set(userId, { at: Date.now(), registry });
   return registry;
 }
 
 export const invalidateUserRegistry = (userId: string): void => {
   userRegistryCache.delete(userId);
+};
+
+// ── worker registry ─────────────────────────────────────────────────────────
+
+let workerRegistry: { at: number; registry: ProviderRegistry } | null = null;
+const WORKER_REGISTRY_TTL_MS = 60_000;
+
+/**
+ * A registry for background jobs, which have no request and therefore no user.
+ *
+ * Environment credentials win when present — that is the headless deployment
+ * story. But once credentials moved into the app, a machine with an empty
+ * `.env` left every job holding a registry with nothing configured, so the
+ * instrument sync quietly skipped and every downstream feature reported "no
+ * data" while Settings insisted the provider was connected. Falling back to
+ * stored credentials is what closes that gap.
+ *
+ * Only safe because the platform is single-tenant-credential by default
+ * (`SHARED_FEED_LICENSED=false`): the jobs that use this registry write shared
+ * reference data — the instrument master, index breadth — not per-user feeds.
+ * With more than one credentialled user the choice would be arbitrary, so it
+ * refuses rather than guess, and says so.
+ */
+export async function getWorkerRegistry(): Promise<ProviderRegistry> {
+  const envRegistry = getRegistry();
+  if (envRegistry.all().some((p) => p.isConfigured())) return envRegistry;
+
+  if (workerRegistry && Date.now() - workerRegistry.at < WORKER_REGISTRY_TTL_MS) {
+    return workerRegistry.registry;
+  }
+
+  const { rows } = await query<{ user_id: string; n: string }>(
+    `SELECT user_id, COUNT(*)::text AS n
+       FROM api_providers
+      WHERE is_enabled = TRUE AND credentials_enc IS NOT NULL
+      GROUP BY user_id`,
+  );
+
+  if (rows.length === 0) {
+    logger.warn(
+      'No provider credentials in the environment or the database; background jobs have no data source.',
+    );
+    return envRegistry;
+  }
+  if (rows.length > 1) {
+    logger.warn(
+      { users: rows.length },
+      'Several users have broker credentials. Background jobs will not pick one on their own — ' +
+        'set credentials in the environment to say which account shared jobs should use.',
+    );
+    return envRegistry;
+  }
+
+  const userId = rows[0]!.user_id;
+  const registry = await registryForUser(userId);
+  logger.info(
+    { userId, providers: registry.all().filter((p) => p.isConfigured()).map((p) => p.manifest.id) },
+    'Background jobs adopted the stored credentials of the only credentialled account',
+  );
+  workerRegistry = { at: Date.now(), registry };
+  return registry;
+}
+
+export const resetWorkerRegistry = (): void => {
+  workerRegistry = null;
 };
 
 // ── data-quality ledger ─────────────────────────────────────────────────────

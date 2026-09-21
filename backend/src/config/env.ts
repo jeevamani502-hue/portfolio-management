@@ -149,6 +149,8 @@ const schema = z.object({
         .filter(Boolean),
     ),
 
+  /** Directory holding the built frontend. Unset in dev; Vite serves it. */
+  WEB_ROOT: optional,
   ANTHROPIC_API_KEY: optional,
   AI_MODEL: z.string().default('claude-opus-5'),
   AI_MAX_TOKENS: int(4096),

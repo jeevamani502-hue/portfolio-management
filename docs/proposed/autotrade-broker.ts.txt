@@ -1,0 +1,177 @@
+/**
+ * Order routing for automated trading.
+ *
+ * One interface, two implementations. `PaperBroker` simulates a fill against
+ * the real quote and writes to the same ledger; `LiveBroker` sends the order
+ * to the user's actual broker. Everything upstream — the engine, the exit
+ * monitor, the reporting — is identical for both, which is the point: paper
+ * results are only meaningful if the paper path is the same code path.
+ *
+ * The two differ in exactly one respect that matters, and it is deliberate:
+ * a paper fill is optimistic about existence (it always fills) and
+ * pessimistic about price (it pays the spread and a slippage allowance),
+ * because a paper record that flatters the strategy is worse than no record.
+ */
+import type { ProviderRegistry } from '../../providers/registry.js';
+import type { InstrumentRow } from '../../db/repositories/instruments.js';
+import { getQuote } from '../market/marketData.service.js';
+import { isAvailable } from '../../utils/sourced.js';
+import { logger } from '../../utils/logger.js';
+import { AppError } from '../../utils/errors.js';
+
+export type TradeMode = 'PAPER' | 'LIVE';
+export type Side = 'BUY' | 'SELL';
+
+export interface OrderRequest {
+  instrument: InstrumentRow;
+  side: Side;
+  quantity: number;
+  /** Null for a market order. */
+  limitPrice: number | null;
+  /** Free text recorded on the trade, never sent to the broker. */
+  reason: string;
+}
+
+export interface OrderResult {
+  filled: boolean;
+  /** Average fill price. Null when the order did not fill. */
+  price: number | null;
+  orderId: string | null;
+  /** Provider that handled it, or 'paper'. */
+  venue: string;
+  /** Why it did not fill, when it did not. */
+  detail?: string;
+}
+
+export interface Broker {
+  readonly mode: TradeMode;
+  place(req: OrderRequest): Promise<OrderResult>;
+}
+
+const log = logger.child({ module: 'autotrade-broker' });
+
+/**
+ * Slippage charged to every simulated fill, in basis points of price.
+ *
+ * Options on Indian indices routinely slip more than this on a fast move.
+ * The number is intentionally not zero: a backtest or paper run that assumes
+ * perfect fills will show an edge that does not survive contact with a real
+ * order book.
+ */
+const PAPER_SLIPPAGE_BPS = 15;
+
+export class PaperBroker implements Broker {
+  readonly mode = 'PAPER' as const;
+
+  constructor(private readonly registry: ProviderRegistry) {}
+
+  async place(req: OrderRequest): Promise<OrderResult> {
+    const quote = await getQuote(this.registry, req.instrument);
+    if (!isAvailable(quote)) {
+      // No price means no honest simulation. Refusing beats inventing a fill.
+      return {
+        filled: false, price: null, orderId: null, venue: 'paper',
+        detail: quote.detail ?? 'no quote available to simulate a fill against',
+      };
+    }
+
+    const q = quote.value;
+    // Cross the spread when there is one; the mid is not a price you get.
+    const crossed =
+      req.side === 'BUY'
+        ? (q.ask !== null && q.ask > 0 ? q.ask : q.ltp)
+        : (q.bid !== null && q.bid > 0 ? q.bid : q.ltp);
+
+    const slip = crossed * (PAPER_SLIPPAGE_BPS / 10_000);
+    const price = req.side === 'BUY' ? crossed + slip : crossed - slip;
+
+    if (req.limitPrice !== null) {
+      const wouldFill = req.side === 'BUY' ? price <= req.limitPrice : price >= req.limitPrice;
+      if (!wouldFill) {
+        return {
+          filled: false, price: null, orderId: null, venue: 'paper',
+          detail: `simulated price ${price.toFixed(2)} did not meet the ${req.limitPrice} limit`,
+        };
+      }
+    }
+
+    return {
+      filled: true,
+      price: Number(price.toFixed(2)),
+      orderId: `paper-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      venue: 'paper',
+    };
+  }
+}
+
+/**
+ * Sends real orders to the user's broker.
+ *
+ * Requires a provider that implements `placeOrder`. There is no fallback and
+ * no simulation: if no configured provider can place an order, this throws
+ * rather than quietly doing nothing, because silently not trading while the
+ * user believes trading is live is its own kind of failure.
+ */
+export class LiveBroker implements Broker {
+  readonly mode = 'LIVE' as const;
+
+  constructor(private readonly registry: ProviderRegistry) {}
+
+  async place(req: OrderRequest): Promise<OrderResult> {
+    const capable = this.registry
+      .all()
+      .filter((p) => p.isConfigured() && typeof p.placeOrder === 'function');
+
+    if (capable.length === 0) {
+      throw new AppError(
+        'NO_ORDER_PROVIDER',
+        'Live trading is on, but no configured provider can place orders. ' +
+          'Switch to paper mode or configure a broker with order permission.',
+        503,
+      );
+    }
+
+    // No failover here on purpose. Retrying a possibly-placed order against a
+    // second broker is how one intended trade becomes two real positions.
+    const provider = capable[0]!;
+    try {
+      const res = await provider.placeOrder!({
+        exchange: req.instrument.exchange,
+        tradingsymbol: req.instrument.tradingsymbol,
+        providerToken: req.instrument.provider_tokens?.[provider.manifest.id] ?? null,
+        side: req.side,
+        quantity: req.quantity,
+        orderType: req.limitPrice === null ? 'MARKET' : 'LIMIT',
+        price: req.limitPrice,
+        product: 'INTRADAY',
+      });
+
+      log.info(
+        { provider: provider.manifest.id, orderId: res.orderId, symbol: req.instrument.tradingsymbol },
+        'Live order placed',
+      );
+      return {
+        filled: res.status === 'COMPLETE',
+        price: res.averagePrice,
+        orderId: res.orderId,
+        venue: provider.manifest.id,
+        ...(res.status !== 'COMPLETE' ? { detail: `order ${res.status}` } : {}),
+      };
+    } catch (err) {
+      // An order that errors may still have reached the exchange. Say so
+      // rather than reporting a clean failure the caller might retry.
+      log.error({ err, symbol: req.instrument.tradingsymbol }, 'Live order failed');
+      throw new AppError(
+        'ORDER_FAILED',
+        `Order for ${req.instrument.tradingsymbol} failed: ` +
+          `${err instanceof Error ? err.message : 'unknown'}. ` +
+          'Check your broker terminal before retrying — it may have been accepted.',
+        502,
+      );
+    }
+  }
+}
+
+export function brokerFor(mode: TradeMode, registry: ProviderRegistry): Broker {
+  return mode === 'LIVE' ? new LiveBroker(registry) : new PaperBroker(registry);
+}

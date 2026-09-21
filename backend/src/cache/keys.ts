@@ -68,3 +68,21 @@ export const TTL = {
   symbolLookup: 3600,
   marketStatus: 30,
 } as const;
+
+/**
+ * Namespace a market-data cache key to one user's broker entitlement.
+ *
+ * Quotes and option chains are fetched with a specific user's broker
+ * credentials. Caching them under a global key means the next user to ask —
+ * possibly one with no provider configured at all — is served that data.
+ * That is redistribution of a licensed feed, so unless the operator has
+ * declared a licence for it, every key is scoped to the account that paid
+ * for the data.
+ *
+ * A null scope is the environment-credential registry used by background
+ * jobs, which legitimately writes shared reference data.
+ */
+export function scopedKey(key: string, userId: string | null, sharedLicensed: boolean): string {
+  if (sharedLicensed || userId === null) return key;
+  return `u:${userId}:${key}`;
+}
