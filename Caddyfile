@@ -1,0 +1,36 @@
+# HTTPS in front of the API.
+#
+# Caddy obtains and renews a Let's Encrypt certificate for {$DOMAIN} on its
+# own, which matters here: the login page guards broker credentials, and
+# serving that over plain HTTP on a public IP would put them on the wire in
+# clear text.
+
+{$DOMAIN} {
+	encode zstd gzip
+
+	# The API serves the frontend too, so everything goes to one upstream.
+	reverse_proxy app:4000 {
+		health_uri /health
+		health_interval 30s
+	}
+
+	# The websocket used for live ticks and alert pushes upgrades through
+	# the same proxy; Caddy handles that without extra configuration.
+
+	header {
+		# This app is never meant to be framed by another site.
+		X-Frame-Options DENY
+		X-Content-Type-Options nosniff
+		Referrer-Policy strict-origin-when-cross-origin
+		# Tell browsers to refuse plain HTTP for a year. Only safe once the
+		# certificate is working, which it will be by the time this is served.
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+	}
+
+	log {
+		output file /data/access.log {
+			roll_size 10MiB
+			roll_keep 5
+		}
+	}
+}

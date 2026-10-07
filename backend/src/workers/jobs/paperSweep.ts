@@ -2,7 +2,7 @@ import { logger } from '../../utils/logger.js';
 import { queryRows } from '../../db/pool.js';
 import { runEntrySweep, runExitSweep } from '../../modules/paper/paper.service.js';
 import { adviseOnOpenPositions, isActionable } from '../../modules/paper/advisor.js';
-import { pushToUser } from '../../websocket/server.js';
+import { notify } from '../../modules/notifications/notifications.service.js';
 
 /**
  * Advice already sent, so the same recommendation is not repeated every
@@ -55,14 +55,19 @@ export async function sweepPaperTrading(): Promise<void> {
         if (notified.has(key)) continue;
         notified.add(key);
 
-        pushToUser(u.user_id, {
-          type: 'paper_advice',
-          tradeId: advice.tradeId,
-          action: advice.action,
-          symbol: advice.tradingsymbol,
+        await notify(u.user_id, {
+          kind: 'paper_advice',
+          severity: advice.action === 'CLOSE' ? 'warning' : 'action',
+          title: `${advice.tradingsymbol}: ${advice.action === 'CLOSE' ? 'close now' : 'consider closing'}`,
           message: advice.headline,
-          reasons: advice.reasons,
-          unrealizedNet: advice.unrealizedNet,
+          payload: {
+            tradeId: advice.tradeId,
+            action: advice.action,
+            reasons: advice.reasons,
+            unrealizedNet: advice.unrealizedNet,
+            unrealizedPct: advice.unrealizedPct,
+          },
+          link: '/paper',
         });
         log.info(
           { userId: u.user_id, symbol: advice.tradingsymbol, action: advice.action },

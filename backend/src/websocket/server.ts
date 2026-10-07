@@ -14,7 +14,7 @@ import type { Server } from 'node:http';
 import { randomUUID } from 'node:crypto';
 import { logger } from '../utils/logger.js';
 import { verifyAccessToken } from '../middleware/index.js';
-import { subscriber } from '../cache/redis.js';
+import { subscriber, redis } from '../cache/redis.js';
 import { K } from '../cache/keys.js';
 import * as instrumentsRepo from '../db/repositories/instruments.js';
 import { marketStatus } from '../modules/market/marketData.service.js';
@@ -195,15 +195,17 @@ function send(client: Client, payload: unknown): void {
  * nothing will ever arrive — precisely the kind of quiet overstatement this
  * platform exists to avoid.
  */
-function upstreamFeedAvailable(): boolean {
-  return getRegistry()
-    .all()
-    .some((p) => p.isConfigured() && p.manifest.capabilities.includes('streamTicks'));
+async function upstreamFeedAvailable(): Promise<boolean> {
+  // The worker writes this when its socket connects or drops. Asking the
+  // registry whether a provider *could* stream is not the same question:
+  // capability without a connected socket is still silence, and reporting
+  // "connected" there would claim prices are flowing when none will arrive.
+  return (await redis.get(K.feedStatus).catch(() => null)) === 'connected';
 }
 
 async function sendStatus(client: Client): Promise<void> {
   const status = await marketStatus().catch(() => null);
-  const hasUpstream = upstreamFeedAvailable();
+  const hasUpstream = await upstreamFeedAvailable();
 
   send(client, {
     op: 'status',

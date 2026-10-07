@@ -31,7 +31,8 @@ export type Capability =
   | 'news'
   | 'mfNav'
   | 'holdings'
-  | 'positions';
+  | 'positions'
+  | 'orders';
 
 export type ProviderId =
   | 'groww'
@@ -249,6 +250,39 @@ export interface NormalizedPosition {
   product: string | null;
 }
 
+// ── orders ──────────────────────────────────────────────────────────────────
+
+export type OrderProduct = 'INTRADAY' | 'CARRYFORWARD';
+export type OrderStatus = 'PENDING' | 'OPEN' | 'COMPLETE' | 'REJECTED' | 'CANCELLED';
+
+export interface OrderRequest {
+  exchange: Exchange;
+  tradingsymbol: string;
+  providerToken: string;
+  side: 'BUY' | 'SELL';
+  quantity: number;
+  orderType: 'MARKET' | 'LIMIT';
+  /** Required for LIMIT; ignored for MARKET. */
+  price?: number;
+  product: OrderProduct;
+  /** Free-text tag the broker echoes back, where supported. */
+  tag?: string;
+}
+
+export interface NormalizedOrder {
+  orderId: string;
+  status: OrderStatus;
+  tradingsymbol: string;
+  side: 'BUY' | 'SELL';
+  quantity: number;
+  filledQuantity: number;
+  /** Average fill price; null until something has filled. */
+  averagePrice: number | null;
+  /** The broker's own status text, e.g. a rejection reason. */
+  message: string | null;
+  updatedAt: string;
+}
+
 export interface NormalizedTick {
   providerToken: string;
   ltp: number;
@@ -357,6 +391,16 @@ export interface MarketDataProvider {
   getHoldings?(): Promise<NormalizedHolding[]>;
   getPositions?(): Promise<NormalizedPosition[]>;
   openTickStream?(sub: TickSubscription): Promise<TickStream>;
+
+  /**
+   * Order routing. Only providers that declare the `orders` capability
+   * implement these, and nothing in the platform calls them except the live
+   * trading module, which is off until the user arms it.
+   */
+  placeOrder?(req: OrderRequest): Promise<{ orderId: string }>;
+  cancelOrder?(orderId: string): Promise<void>;
+  /** The day's order book, newest state of each order. */
+  getOrders?(): Promise<NormalizedOrder[]>;
 }
 
 export const hasCapability = (p: MarketDataProvider, c: Capability): boolean =>

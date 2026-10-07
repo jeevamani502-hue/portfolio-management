@@ -30,6 +30,9 @@ import { aiRouter } from './modules/ai/ai.routes.js';
 import { alertsRouter } from './modules/alerts/alerts.routes.js';
 import { paperRouter } from './modules/paper/paper.routes.js';
 import { backtestRouter } from './modules/backtest/backtest.routes.js';
+import { fnoRouter } from './modules/fno/fno.routes.js';
+import { notificationsRouter } from './modules/notifications/notifications.routes.js';
+import { liveRouter } from './modules/live/live.routes.js';
 
 export function createApp(): Express {
   const app = express();
@@ -140,6 +143,9 @@ export function createApp(): Express {
   api.use('/ai', aiRouter);
   api.use('/alerts', alertsRouter);
   api.use('/backtest', backtestRouter);
+  api.use('/fno', fnoRouter);
+  api.use('/notifications', notificationsRouter);
+  api.use('/live', liveRouter);
 
   api.get('/', (_req, res) => {
     respond(res, {

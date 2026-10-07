@@ -1,0 +1,140 @@
+# Production stack for a single VM — built for Oracle Cloud Always Free.
+#
+# Five containers: the API (which also serves the frontend), the background
+# worker, PostgreSQL, Redis, and Caddy for HTTPS.
+#
+# The worker is a separate container on purpose. On a free host that sleeps,
+# background jobs stop and the scanner, news poller, alert evaluator and
+# paper-trade exits all stop with them — which is most of what this platform
+# does. A real VM keeps them running.
+#
+#   docker compose -f docker-compose.prod.yml up -d --build
+#
+# Secrets come from a `.env.prod` file beside this one; nothing is baked into
+# the image and nothing is committed.
+
+name: bharat
+
+services:
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    environment:
+      # Set in .env.prod. Caddy obtains and renews a Let's Encrypt
+      # certificate for this name automatically.
+      DOMAIN: ${DOMAIN}
+      ACME_EMAIL: ${ACME_EMAIL}
+    depends_on:
+      app:
+        condition: service_healthy
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    # No published ports: only Caddy may reach it, so the API is never
+    # exposed over plain HTTP on the VM's public address.
+    expose:
+      - "4000"
+    environment:
+      NODE_ENV: production
+      PORT: 4000
+      LOG_LEVEL: info
+      DATABASE_URL: postgres://market:${POSTGRES_PASSWORD}@postgres:5432/market_ai
+      REDIS_URL: redis://redis:6379
+      # Plain PostgreSQL: the TimescaleDB image has no reliable arm64 build,
+      # and the migrations detect its absence and fall back.
+      TIMESCALE_ENABLED: "false"
+      USE_IN_MEMORY_REDIS: "false"
+      JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET}
+      JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET}
+      CREDENTIAL_ENC_KEY: ${CREDENTIAL_ENC_KEY}
+      FRONTEND_ORIGIN: https://${DOMAIN}
+      PRIMARY_PROVIDER: ${PRIMARY_PROVIDER:-angelone}
+      SHARED_FEED_LICENSED: "false"
+      AI_ENABLED: ${AI_ENABLED:-false}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      RSS_FEEDS: ${RSS_FEEDS:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      start_period: 60s
+      retries: 3
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    command: ["node", "dist/workers/index.js"]
+    environment:
+      NODE_ENV: production
+      LOG_LEVEL: info
+      DATABASE_URL: postgres://market:${POSTGRES_PASSWORD}@postgres:5432/market_ai
+      REDIS_URL: redis://redis:6379
+      TIMESCALE_ENABLED: "false"
+      USE_IN_MEMORY_REDIS: "false"
+      # The worker must hold the SAME encryption key as the API. With a
+      # different one it cannot decrypt the stored broker credentials, and
+      # every job silently does nothing rather than failing loudly.
+      CREDENTIAL_ENC_KEY: ${CREDENTIAL_ENC_KEY}
+      JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET}
+      JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET}
+      PRIMARY_PROVIDER: ${PRIMARY_PROVIDER:-angelone}
+      RSS_FEEDS: ${RSS_FEEDS:-}
+    depends_on:
+      app:
+        condition: service_healthy
+
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: market
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: market_ai
+    # Not published. Reachable only from the other containers; opening 5432
+    # to the internet is how databases get found and emptied.
+    expose:
+      - "5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U market -d market_ai"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    expose:
+      - "6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  pgdata:
+  redisdata:
+  caddy_data:
+  caddy_config:

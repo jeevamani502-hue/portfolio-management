@@ -23,7 +23,7 @@ alertsRouter.use(requireAuth);
 const ALERT_KINDS = [
   'PRICE_ABOVE', 'PRICE_BELOW', 'PCT_CHANGE', 'RSI_ABOVE', 'RSI_BELOW',
   'VOLUME_MULTIPLE', 'BREAKOUT', 'SUPPORT_BROKEN', 'OI_CHANGE_PCT', 'NEWS', 'SIGNAL',
-  'SWING_SCAN', 'FNO_SETUP',
+  'SWING_SCAN', 'FNO_SETUP', 'NEWS_FNO',
 ] as const;
 
 /** What each alert kind requires in `params`, validated per kind. */
@@ -49,11 +49,24 @@ const PARAM_SCHEMAS: Record<string, z.ZodTypeAny> = {
   }),
   // Capital is required, not defaulted: the engine will not size a position
   // without it, and picking a number here would be inventing the user's risk.
+  // minGrade is the decision engine's checklist grade; B is the lowest grade
+  // the engine itself will act on, so it is the default.
   FNO_SETUP: z.object({
     underlying: z.string().min(1).max(20).default('NIFTY'),
     capital: z.number().positive('capital is required to size the position'),
     riskPercent: z.number().min(0.1).max(10).default(1),
     minConfirmation: z.number().min(0).max(100).default(50),
+    minGrade: z.enum(['A', 'B', 'C']).default('B'),
+  }),
+  // News decides when to look; price and the chain decide which way.
+  NEWS_FNO: z.object({
+    underlying: z.string().min(1).max(20).default('NIFTY'),
+    capital: z.number().positive('capital is required to size the position'),
+    riskPercent: z.number().min(0.1).max(10).default(1),
+    minConfirmation: z.number().min(0).max(100).default(50),
+    minGrade: z.enum(['A', 'B', 'C']).default('B'),
+    /** How strongly the article must be tied to the underlying, 0-1. */
+    minRelevance: z.number().min(0).max(1).default(0.7),
   }),
 };
 
@@ -71,7 +84,7 @@ const createSchema = z.object({
 
 /** Kinds that operate on the market as a whole rather than one instrument. */
 /** Kinds that watch a universe rather than one instrument. */
-const MARKET_WIDE = new Set(['NEWS', 'SWING_SCAN', 'FNO_SETUP']);
+const MARKET_WIDE = new Set(['NEWS', 'SWING_SCAN', 'FNO_SETUP', 'NEWS_FNO']);
 
 alertsRouter.get(
   '/',
@@ -117,8 +130,11 @@ alertsRouter.get(
     respond(res, [
       { kind: 'SWING_SCAN', label: 'Any stock forms a swing setup',
         params: ['minStrength', 'direction'], needsSymbol: false },
-      { kind: 'FNO_SETUP', label: 'An option trade becomes actionable',
-        params: ['underlying', 'capital', 'riskPercent', 'minConfirmation'], needsSymbol: false },
+      { kind: 'FNO_SETUP', label: 'The F&O engine grades an option trade as ENTER',
+        params: ['underlying', 'capital', 'riskPercent', 'minGrade', 'minConfirmation'], needsSymbol: false },
+      { kind: 'NEWS_FNO', label: 'News breaks on an F&O underlying (with the trade, if any)',
+        params: ['underlying', 'capital', 'riskPercent', 'minGrade', 'minConfirmation', 'minRelevance'],
+        needsSymbol: false },
       { kind: 'PRICE_ABOVE', label: 'Price crosses above', params: ['threshold'], needsSymbol: true },
       { kind: 'PRICE_BELOW', label: 'Price crosses below', params: ['threshold'], needsSymbol: true },
       { kind: 'PCT_CHANGE', label: 'Day change exceeds %', params: ['threshold'], needsSymbol: true },

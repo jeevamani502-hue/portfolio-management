@@ -99,8 +99,19 @@ export function directionClass(value: number | null | undefined): string {
 
 const IST_OFFSET_MIN = 330;
 
-export function toIstDate(iso: string | Date): Date {
-  const d = typeof iso === 'string' ? new Date(iso) : iso;
+export function toIstDate(iso: string | number | Date): Date {
+  // A formatter must never take the page down. Anything that is not a
+  // string, number or Date becomes an invalid date, which every caller
+  // already renders as "—"; the warning says what arrived so the source can
+  // be fixed rather than the symptom.
+  let d: Date;
+  if (iso instanceof Date) d = iso;
+  else if (typeof iso === 'string' || typeof iso === 'number') d = new Date(iso);
+  else {
+    // eslint-disable-next-line no-console
+    console.warn('toIstDate: unexpected timestamp value', iso);
+    d = new Date(NaN);
+  }
   return new Date(d.getTime() + IST_OFFSET_MIN * 60_000);
 }
 

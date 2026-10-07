@@ -7,7 +7,7 @@
  * handful of trades says almost nothing, and the page should not let a good
  * first week read as proof.
  */
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '@/services/api';
 import {
@@ -15,8 +15,10 @@ import {
   Button, Input, Label, Tabs,
 } from '@/components/ui';
 import { Metric } from '@/components/market/DataValue';
+import { useTicks } from '@/services/ws';
 import { cn } from '@/lib/utils';
 import type { PaperConfigDto, PaperTradeDto, PositionAdviceDto } from '@/types/api';
+import { EngineStatus } from '@/components/paper/EngineStatus';
 
 const inr = (v: number | string | null | undefined, dp = 0) => {
   const n = typeof v === 'string' ? Number(v) : v;
@@ -72,12 +74,7 @@ export function PaperTrading() {
         </Button>
       </div>
 
-      {config.data?.halted_reason && (
-        <Alert variant="warning" title="Trading is halted">
-          {config.data.halted_reason}. Open positions still close normally. Switching it back on
-          below clears the halt — that is you overruling the limit, so do it deliberately.
-        </Alert>
-      )}
+      <EngineStatus />
 
       {sweep.data && (
         <Alert
@@ -164,6 +161,13 @@ export function PaperTrading() {
         </Card>
       )}
 
+      {tab === 'open' && (trades.data ?? []).length > 0 && (
+        <>
+          <SubscribeTicks trades={trades.data!} />
+          <OpenPnlStrip trades={trades.data!} advice={advice.data ?? []} />
+        </>
+      )}
+
       <div>
         <Tabs
           active={tab}
@@ -189,6 +193,7 @@ export function PaperTrading() {
             ) : (
               <TradeTable
                 trades={trades.data!}
+                advice={advice.data ?? []}
                 onClose={(id) => close.mutate(id)}
                 closing={close.isPending}
               />
@@ -200,10 +205,97 @@ export function PaperTrading() {
   );
 }
 
+/**
+ * The live mark for an open paper position.
+ *
+ * Streaming tick first (the ingest subscribes every open paper contract),
+ * then the advisor's last price (refreshed each minute), then nothing. The
+ * source is shown beside the number so a stale mark is never mistaken for a
+ * live one.
+ */
+function useLiveMark(advice: PositionAdviceDto[]) {
+  const ticks = useTicks((s) => s.ticks);
+  const feedState = useTicks((s) => s.feedState);
+  const adviceById = new Map(advice.map((a) => [a.tradeId, a]));
+  return (t: PaperTradeDto): { ltp: number | null; source: 'live' | 'advisor' | null; net: number | null } => {
+    const tick = feedState === 'connected' ? ticks[`${t.exchange}:${t.tradingsymbol}`] : undefined;
+    const a = adviceById.get(t.id);
+    if (tick) return { ltp: tick.ltp, source: 'live', net: a?.unrealizedNet ?? null };
+    if (a?.currentPrice !== null && a?.currentPrice !== undefined) return { ltp: a.currentPrice, source: 'advisor', net: a.unrealizedNet };
+    return { ltp: null, source: null, net: null };
+  };
+}
+
+/**
+ * The gateway forwards ticks only for symbols this browser asked for. Ask
+ * for every open contract while the Open tab is showing; the server side
+ * already streams them, so the first tick arrives within a second.
+ */
+function SubscribeTicks({ trades }: { trades: PaperTradeDto[] }) {
+  const subscribe = useTicks((s) => s.subscribe);
+  const unsubscribe = useTicks((s) => s.unsubscribe);
+  const key = trades.map((t) => `${t.exchange}:${t.tradingsymbol}`).sort().join(',');
+  useEffect(() => {
+    const symbols = key ? key.split(',') : [];
+    if (symbols.length === 0) return;
+    subscribe(symbols);
+    return () => unsubscribe(symbols);
+  }, [key, subscribe, unsubscribe]);
+  return null;
+}
+
+/** Running total across every open paper position, from the same marks as the rows. */
+function OpenPnlStrip({ trades, advice }: { trades: PaperTradeDto[]; advice: PositionAdviceDto[] }) {
+  const mark = useLiveMark(advice);
+  let gross = 0;
+  let outlay = 0;
+  let marked = 0;
+  let live = 0;
+  for (const t of trades) {
+    const m = mark(t);
+    const entry = Number(t.entry_price);
+    outlay += entry * t.quantity;
+    if (m.ltp === null) continue;
+    marked += 1;
+    if (m.source === 'live') live += 1;
+    gross += (m.ltp - entry) * t.quantity;
+  }
+  const pct = outlay > 0 ? (gross / outlay) * 100 : null;
+  return (
+    <Card>
+      <CardContent className="flex flex-wrap items-center justify-between gap-4 pt-4">
+        <div>
+          <div className="text-2xs uppercase tracking-wide text-muted-foreground">Open P&amp;L, live</div>
+          <div className={cn('tabular text-2xl font-semibold', pnlClass(gross))}>
+            {marked === 0 ? '—' : `${gross >= 0 ? '+' : ''}${inr(gross, 0)}`}
+            {pct !== null && marked > 0 && (
+              <span className="ml-2 text-sm font-normal">({pct >= 0 ? '+' : ''}{pct.toFixed(1)}%)</span>
+            )}
+          </div>
+        </div>
+        <div className="flex gap-5">
+          <Metric label="Positions" value={trades.length} />
+          <Metric label="Premium out" value={inr(outlay, 0)} />
+          <Metric
+            label="Marked"
+            value={`${marked}/${trades.length}`}
+            sub={live === marked && marked > 0 ? 'all streaming' : live > 0 ? `${live} streaming` : marked > 0 ? 'advisor price (≤ 1 min old)' : 'no price yet'}
+          />
+        </div>
+        <p className="w-full text-2xs leading-relaxed text-muted-foreground">
+          Gross, before exit costs. The advisor panel above shows each position net of the full
+          round-trip cost stack. A position with no price is shown as unmarked, never as zero.
+        </p>
+      </CardContent>
+    </Card>
+  );
+}
+
 function TradeTable({
-  trades, onClose, closing,
-}: { trades: PaperTradeDto[]; onClose: (id: string) => void; closing: boolean }) {
+  trades, advice, onClose, closing,
+}: { trades: PaperTradeDto[]; advice: PositionAdviceDto[]; onClose: (id: string) => void; closing: boolean }) {
   const isOpen = trades[0]?.status === 'OPEN';
+  const mark = useLiveMark(advice);
   return (
     <div className="overflow-x-auto">
       <table className="w-full text-sm">
@@ -212,11 +304,13 @@ function TradeTable({
             <th className="px-4 py-2 text-left font-medium">Contract</th>
             <th className="px-4 py-2 text-right font-medium">Qty</th>
             <th className="px-4 py-2 text-right font-medium">Entry</th>
+            {isOpen && <th className="px-4 py-2 text-right font-medium">LTP</th>}
+            {isOpen && <th className="px-4 py-2 text-right font-medium">P&amp;L</th>}
             <th className="px-4 py-2 text-right font-medium">Stop</th>
             <th className="px-4 py-2 text-right font-medium">Target</th>
             {isOpen ? (
               <>
-                <th className="px-4 py-2 text-right font-medium">Confirm</th>
+                <th className="px-4 py-2 text-left font-medium">Stop ← · → target</th>
                 <th className="px-4 py-2 text-right font-medium" />
               </>
             ) : (
@@ -232,21 +326,68 @@ function TradeTable({
         <tbody>
           {trades.map((t) => {
             const net = t.net_pnl === null ? null : Number(t.net_pnl);
+            const entry = Number(t.entry_price);
+            const stop = t.stop_price === null ? null : Number(t.stop_price);
+            const target = t.target_price === null ? null : Number(t.target_price);
+            const m = isOpen ? mark(t) : { ltp: null, source: null, net: null };
+            const gross = m.ltp === null ? null : (m.ltp - entry) * t.quantity;
+            const pct = m.ltp === null ? null : ((m.ltp - entry) / entry) * 100;
+            // Where the price sits between the stop (0) and the target (1).
+            const pos =
+              m.ltp !== null && stop !== null && target !== null && target > stop
+                ? Math.max(0, Math.min(1, (m.ltp - stop) / (target - stop)))
+                : null;
+            const entryPos =
+              stop !== null && target !== null && target > stop ? (entry - stop) / (target - stop) : null;
             return (
               <tr key={t.id} className="border-b border-border/50 last:border-0">
                 <td className="px-4 py-2">
                   <div className="font-mono">{t.tradingsymbol}</div>
                   <div className="text-2xs text-muted-foreground">
                     {new Date(t.entry_at).toLocaleString('en-IN')}
+                    {isOpen && t.confirmation !== null && ` · score ${t.confirmation}`}
                   </div>
                 </td>
                 <td className="px-4 py-2 text-right font-mono">{t.quantity}</td>
                 <td className="px-4 py-2 text-right font-mono">{inr(t.entry_price, 2)}</td>
+                {isOpen && (
+                  <td className="px-4 py-2 text-right font-mono">
+                    {m.ltp === null ? (
+                      <span className="text-muted-foreground">no price</span>
+                    ) : (
+                      <span className={cn(m.source === 'live' && 'text-live')} title={m.source === 'live' ? 'Streaming' : 'Advisor price, up to a minute old'}>
+                        {inr(m.ltp, 2)}
+                      </span>
+                    )}
+                  </td>
+                )}
+                {isOpen && (
+                  <td className={cn('px-4 py-2 text-right font-mono', pnlClass(gross))}>
+                    {gross === null ? '—' : (
+                      <>
+                        {gross >= 0 ? '+' : ''}{inr(gross, 0)}
+                        <div className="text-2xs">{pct !== null && `${pct >= 0 ? '+' : ''}${pct.toFixed(1)}%`}{m.net !== null && ` · net ${inr(m.net, 0)}`}</div>
+                      </>
+                    )}
+                  </td>
+                )}
                 <td className="px-4 py-2 text-right font-mono">{inr(t.stop_price, 2)}</td>
                 <td className="px-4 py-2 text-right font-mono">{inr(t.target_price, 2)}</td>
                 {isOpen ? (
                   <>
-                    <td className="px-4 py-2 text-right font-mono">{t.confirmation ?? '—'}</td>
+                    <td className="px-4 py-2">
+                      <div className="relative h-1.5 w-32 overflow-hidden rounded bg-muted">
+                        {pos !== null && (
+                          <div className={cn('absolute inset-y-0 left-0 rounded', gross !== null && gross >= 0 ? 'bg-bull' : 'bg-bear')} style={{ width: `${pos * 100}%` }} />
+                        )}
+                        {entryPos !== null && (
+                          <div className="absolute inset-y-0 w-px bg-foreground/60" style={{ left: `${Math.max(0, Math.min(100, entryPos * 100))}%` }} aria-hidden />
+                        )}
+                      </div>
+                      <div className="mt-0.5 text-2xs text-muted-foreground">
+                        {pos === null ? '—' : `${(pos * 100).toFixed(0)}% of the way from stop to target`}
+                      </div>
+                    </td>
                     <td className="px-4 py-2 text-right">
                       <Button
                         variant="ghost"

@@ -16,6 +16,7 @@
  */
 import { execFileSync, spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { platform } from 'node:os';
 
@@ -23,7 +24,11 @@ import { platform } from 'node:os';
 // service, so it does not come back after a reboot. Treating it as a target
 // means one command brings the whole stack up.
 const PG_BIN = process.env.PG_BIN ?? 'C:/Program Files/PostgreSQL/17/bin';
-const PG_DATA = process.env.PG_DATA ?? `${process.env.TEMP ?? '/tmp'}/bt-pgdata`;
+// Not under TEMP: Windows' storage cleanup deleted files out of a live cluster
+// there (postgresql.conf, catalog indexes, whole tables) and the database had
+// to be rebuilt from what was still readable. The old directory is left in
+// place as a read-only remnant.
+const PG_DATA = process.env.PG_DATA ?? 'C:/Jeevamani/bt-pgdata';
 const PG_PORT = Number(process.env.PG_PORT ?? 5433);
 
 const TARGETS = {
@@ -84,6 +89,16 @@ async function ensurePostgres() {
 // repo's own path, and spawn then fails with ENOENT on a directory that looks
 // correct in the error message.
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
+
+/**
+ * Where each service's output goes.
+ *
+ * Detached children previously ran with stdio 'ignore', which meant a crash
+ * or a startup error left no trace anywhere — the only symptom was a port
+ * that never opened. Logs are the whole point of being able to restart.
+ */
+const LOG_DIR = join(repoRoot, 'logs');
+mkdirSync(LOG_DIR, { recursive: true });
 
 /** PIDs whose command line contains `needle`. */
 function findPids(needle) {
@@ -152,14 +167,23 @@ if (selected.includes('api') || selected.includes('worker')) {
 console.log('');
 for (const name of selected) {
   const { label, args } = TARGETS[name];
-  const child = spawn(isWindows ? 'npm.cmd' : 'npm', args, {
-    cwd: repoRoot,
-    detached: true,
-    stdio: 'ignore',
-    shell: isWindows,
-  });
-  child.unref();
-  console.log(`${label}: starting (pid ${child.pid})`);
+  const logFile = join(LOG_DIR, `${name}.log`);
+  // Start-Process is the only launcher that reliably survives this script
+  // exiting on Windows AND writes the child's output where it can be read.
+  // `cmd /c` under spawn gets torn down with the parent, and an inherited
+  // file descriptor never reaches the grandchild that produces the output.
+  if (isWindows) {
+    execFileSync('powershell', [
+      '-NoProfile', '-Command',
+      `Start-Process -FilePath cmd.exe -ArgumentList '/c','npm ${args.join(' ')} > \"${logFile}\" 2>&1' ` +
+      `-WorkingDirectory '${repoRoot}' -WindowStyle Hidden`,
+    ], { stdio: 'ignore' });
+  } else {
+    spawn('sh', ['-c', `npm ${args.join(' ')} > "${logFile}" 2>&1`], {
+      cwd: repoRoot, detached: true, stdio: 'ignore',
+    }).unref();
+  }
+  console.log(`${label}: starting → logs/${name}.log`);
 }
 
 // Report readiness rather than claiming it.

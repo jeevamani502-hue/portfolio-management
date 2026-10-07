@@ -379,7 +379,13 @@ export function buildOptionSetup(input: OptionSetupInput): OptionSetup {
   }
 
   // ── 7. only then, a trade ─────────────────────────────────────────────────
-  if (rewardRisk !== null && rewardRisk < minRewardRisk) {
+  // The target is placed at exactly minRewardRisk × the stop distance, so
+  // whenever the stop is reachable the ratio equals the floor by construction
+  // and only floating-point noise decides which side of it lands. Without the
+  // tolerance, 1.4999999999999998 rejected trades that 1.5000000000000002 let
+  // through — a coin flip on the last bit of a double.
+  const RR_TOLERANCE = 1e-9;
+  if (rewardRisk !== null && rewardRisk < minRewardRisk - RR_TOLERANCE) {
     rejected.push(`Reward:risk of ${rewardRisk.toFixed(2)}:1 is below the ${minRewardRisk}:1 floor.`);
     return base({
       bias, strike: row.strike, optionType, entryPremium, stopPremium, targetPremium,

@@ -4,6 +4,7 @@ import { asyncHandler, respond, requireAuth, validate } from '../../middleware/i
 import { badRequest } from '../../utils/errors.js';
 import * as paper from './paper.service.js';
 import { adviseOnOpenPositions } from './advisor.js';
+import { getPaperStatus } from './status.service.js';
 
 export const paperRouter = Router();
 paperRouter.use(requireAuth);
@@ -129,5 +130,19 @@ paperRouter.post(
     const result = await paper.openFromSetup(req.user!.id, underlying);
     if (!result.opened) throw badRequest(result.reason);
     respond(res, { opened: true, underlying: underlying.toUpperCase() });
+  }),
+);
+
+/**
+ * What the engine is doing and why nothing has traded.
+ *
+ * Deliberately a separate endpoint from the config: "is it on" and "can it
+ * actually trade right now" are different questions, and only the second
+ * one explains an empty ledger.
+ */
+paperRouter.get(
+  '/status',
+  asyncHandler(async (req, res) => {
+    respond(res, await getPaperStatus(req.user!.id));
   }),
 );

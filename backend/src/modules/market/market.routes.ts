@@ -4,6 +4,7 @@ import {
   asyncHandler, respond, requireAuth, validate, timeframeSchema, symbolParamSchema,
 } from '../../middleware/index.js';
 import { notFound, dataUnavailable } from '../../utils/errors.js';
+import { computeIndicators } from './indicators.service.js';
 import { registryForUser } from '../../providers/registry.js';
 import * as instrumentsRepo from '../../db/repositories/instruments.js';
 import { getQuote, getQuotes, getCandles, marketStatus } from './marketData.service.js';
@@ -254,6 +255,64 @@ marketRouter.get(
         sector: r.sector,
         lotSize: r.lot_size,
       })),
+    );
+  }),
+);
+
+/**
+ * Candles plus indicator series, aligned index-for-index.
+ *
+ * One request rather than two so the chart cannot render a line against a
+ * different set of bars from the ones it was computed on.
+ */
+const chartSchema = z.object({
+  tf: timeframeSchema,
+  bars: z.coerce.number().int().min(50).max(1000).default(300),
+  overlays: z.string().optional(),
+  panes: z.string().optional(),
+});
+
+marketRouter.get(
+  '/chart/:symbol',
+  validate(symbolParamSchema, 'params'),
+  validate(chartSchema, 'query'),
+  asyncHandler(async (req, res) => {
+    const { symbol } = req.params as unknown as z.infer<typeof symbolParamSchema>;
+    const q = req.query as unknown as z.infer<typeof chartSchema>;
+
+    const instrument = await instrumentsRepo.resolveSymbol(symbol);
+    if (!instrument) throw notFound(`No instrument matches "${symbol}"`);
+
+    const registry = await registryForUser(req.user!.id);
+    const result = await getCandles(registry, instrument, q.tf, { bars: q.bars });
+
+    if (result.candles.length === 0) {
+      throw dataUnavailable(
+        `${instrument.tradingsymbol} (${q.tf})`,
+        'no price history returned for this timeframe',
+      );
+    }
+
+    const split = (v: string | undefined) =>
+      v === undefined ? undefined : v.split(',').map((x) => x.trim()).filter(Boolean);
+
+    respond(
+      res,
+      {
+        symbol: `${instrument.exchange}:${instrument.tradingsymbol}`,
+        name: instrument.name,
+        timeframe: q.tf,
+        candles: result.candles,
+        indicators: computeIndicators(result.candles, {
+          ...(split(q.overlays) ? { overlays: split(q.overlays) as never } : {}),
+          ...(split(q.panes) ? { panes: split(q.panes) as never } : {}),
+        }),
+      },
+      {
+        source: result.source,
+        asOf: result.asOf,
+        dataStatus: result.fromStorage ? 'stored' : 'live',
+      },
     );
   }),
 );

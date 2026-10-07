@@ -127,6 +127,41 @@ export function Alerts() {
   );
 }
 
+/**
+ * What each alert parameter means, so the form can render any kind the
+ * server declares.
+ *
+ * Previously the form hard-coded three parameter names, so a kind needing
+ * anything else silently submitted an empty params object and the server
+ * rejected it as invalid — with no indication of which field was missing.
+ * Driving the inputs from the catalogue means a new kind works here the
+ * moment the server advertises it.
+ */
+const PARAM_META: Record<
+  string,
+  { label: string; type: 'number' | 'text'; default: string; min?: number; max?: number; step?: string; help?: string }
+> = {
+  threshold: { label: 'Threshold', type: 'number', default: '', step: 'any' },
+  lookback: { label: 'Lookback bars', type: 'number', default: '20', min: 5, max: 250 },
+  minStrength: { label: 'Min confirmation', type: 'number', default: '60', min: 0, max: 100 },
+  minConfirmation: { label: 'Min confirmation', type: 'number', default: '50', min: 0, max: 100 },
+  minGrade: {
+    label: 'Min grade (A, B or C)', type: 'text', default: 'B',
+    help: 'The decision engine\'s checklist grade. B is the lowest grade the engine acts on itself.',
+  },
+  underlying: { label: 'Underlying', type: 'text', default: 'NIFTY' },
+  capital: {
+    label: 'Your capital (₹)', type: 'number', default: '', min: 1,
+    help: 'Required — the position cannot be sized without it.',
+  },
+  riskPercent: { label: 'Risk per trade (%)', type: 'number', default: '1', min: 0.1, max: 10, step: 'any' },
+  minRelevance: {
+    label: 'Min news relevance', type: 'number', default: '0.7', min: 0, max: 1, step: '0.05',
+    help: 'How tightly the article must tie to the underlying, 0 to 1.',
+  },
+  direction: { label: 'Direction (LONG/SHORT, blank for both)', type: 'text', default: '' },
+};
+
 function CreateAlertForm({
   kinds,
   onDone,
@@ -136,19 +171,25 @@ function CreateAlertForm({
 }) {
   const [kind, setKind] = useState(kinds[0]?.kind ?? 'PRICE_ABOVE');
   const [symbol, setSymbol] = useState('');
-  const [threshold, setThreshold] = useState('');
-  const [lookback, setLookback] = useState('20');
   const [timeframe, setTimeframe] = useState('1d');
+  const [values, setValues] = useState<Record<string, string>>({});
   const qc = useQueryClient();
 
   const selected = kinds.find((k) => k.kind === kind);
+  const paramNames = selected?.params ?? [];
+
+  const valueFor = (name: string) => values[name] ?? PARAM_META[name]?.default ?? '';
 
   const create = useMutation({
     mutationFn: () => {
-      const params: Record<string, number> = {};
-      if (selected?.params.includes('threshold')) params['threshold'] = Number(threshold);
-      if (selected?.params.includes('lookback')) params['lookback'] = Number(lookback);
-      if (selected?.params.includes('minStrength')) params['minStrength'] = Number(threshold || 60);
+      const params: Record<string, number | string> = {};
+      for (const name of paramNames) {
+        const raw = valueFor(name).trim();
+        // Send nothing for a blank optional field and let the server's own
+        // default apply, rather than submitting 0 or an empty string.
+        if (raw === '') continue;
+        params[name] = PARAM_META[name]?.type === 'text' ? raw.toUpperCase() : Number(raw);
+      }
       return api.alerts.create({
         kind,
         ...(symbol ? { symbol: symbol.toUpperCase() } : {}),
@@ -163,17 +204,26 @@ function CreateAlertForm({
     },
   });
 
+  // Anything the server marks required must be present before submitting.
+  const missing = paramNames.filter(
+    (n) => PARAM_META[n]?.help?.startsWith('Required') && valueFor(n).trim() === '',
+  );
+
   return (
     <Card>
       <CardHeader><CardTitle>New alert</CardTitle></CardHeader>
       <CardContent>
         <form
           onSubmit={(e) => { e.preventDefault(); create.mutate(); }}
-          className="grid gap-3 sm:grid-cols-5"
+          className="grid gap-3 sm:grid-cols-4"
         >
           <div className="space-y-1 sm:col-span-2">
             <Label htmlFor="a-kind">Condition</Label>
-            <Select id="a-kind" value={kind} onChange={(e) => setKind(e.target.value)}>
+            <Select
+              id="a-kind"
+              value={kind}
+              onChange={(e) => { setKind(e.target.value); setValues({}); }}
+            >
               {kinds.map((k) => (
                 <option key={k.kind} value={k.kind}>{k.label}</option>
               ))}
@@ -191,27 +241,27 @@ function CreateAlertForm({
             </div>
           )}
 
-          {(selected?.params.includes('threshold') || selected?.params.includes('minStrength')) && (
-            <div className="space-y-1">
-              <Label htmlFor="a-threshold">
-                {selected.params.includes('minStrength') ? 'Min confirmation' : 'Threshold'}
-              </Label>
-              <Input
-                id="a-threshold" type="number" step="any"
-                value={threshold} onChange={(e) => setThreshold(e.target.value)} required
-              />
-            </div>
-          )}
-
-          {selected?.params.includes('lookback') && (
-            <div className="space-y-1">
-              <Label htmlFor="a-lookback">Lookback bars</Label>
-              <Input
-                id="a-lookback" type="number" min={5} max={250}
-                value={lookback} onChange={(e) => setLookback(e.target.value)}
-              />
-            </div>
-          )}
+          {paramNames.map((name) => {
+            const meta = PARAM_META[name];
+            if (!meta) return null;
+            return (
+              <div key={name} className="space-y-1">
+                <Label htmlFor={`a-${name}`}>{meta.label}</Label>
+                <Input
+                  id={`a-${name}`}
+                  type={meta.type}
+                  {...(meta.min !== undefined ? { min: meta.min } : {})}
+                  {...(meta.max !== undefined ? { max: meta.max } : {})}
+                  {...(meta.step ? { step: meta.step } : {})}
+                  value={valueFor(name)}
+                  onChange={(e) => setValues((v) => ({ ...v, [name]: e.target.value }))}
+                />
+                {meta.help && (
+                  <p className="text-2xs leading-relaxed text-muted-foreground">{meta.help}</p>
+                )}
+              </div>
+            );
+          })}
 
           <div className="space-y-1">
             <Label htmlFor="a-tf">Timeframe</Label>
@@ -220,11 +270,16 @@ function CreateAlertForm({
             </Select>
           </div>
 
-          <div className="flex items-end gap-2 sm:col-span-5">
-            <Button type="submit" disabled={create.isPending}>
+          <div className="flex items-end gap-2 sm:col-span-4">
+            <Button type="submit" disabled={create.isPending || missing.length > 0}>
               {create.isPending ? 'Creating…' : 'Create alert'}
             </Button>
             <Button type="button" variant="ghost" onClick={onDone}>Cancel</Button>
+            {missing.length > 0 && (
+              <span className="text-sm text-muted-foreground">
+                Fill in {missing.map((m) => PARAM_META[m]?.label ?? m).join(', ')}.
+              </span>
+            )}
           </div>
         </form>
         {create.isError && (

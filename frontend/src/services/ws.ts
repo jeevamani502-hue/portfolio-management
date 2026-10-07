@@ -12,6 +12,8 @@
  */
 import { create } from 'zustand';
 import { getAccessToken } from '@/services/api';
+import { useNotifications } from '@/store/notifications';
+import type { NotificationDto } from '@/types/api';
 
 export interface Tick {
   s: string;
@@ -40,7 +42,11 @@ interface TickStore {
   reset: () => void;
 }
 
-const WS_URL = import.meta.env['VITE_WS_URL'] ?? `ws://${window.location.host}/ws`;
+// The scheme has to follow the page's own: a browser refuses to open a ws://
+// socket from an https:// document, and behind a TLS-terminating tunnel
+// (ngrok, Cloudflare) the page is https even though the dev server is not.
+const WS_SCHEME = window.location.protocol === 'https:' ? 'wss' : 'ws';
+const WS_URL = import.meta.env['VITE_WS_URL'] ?? `${WS_SCHEME}://${window.location.host}/ws`;
 
 let socket: WebSocket | null = null;
 let reconnectAttempt = 0;
@@ -108,7 +114,22 @@ export function connect(): void {
   useTicks.setState({ feedState: 'connecting', feedReason: null });
 
   const url = `${WS_URL}?token=${encodeURIComponent(token)}`;
-  socket = new WebSocket(url);
+  let ws: WebSocket;
+  try {
+    ws = new WebSocket(url);
+  } catch (err) {
+    // The constructor throws synchronously when the browser rejects the URL
+    // outright. subscribe() calls connect() during render, so an escaping
+    // throw tears down the whole tree instead of leaving one dead feed.
+    // No reconnect: a rejected URL will be rejected again every time.
+    socket = null;
+    useTicks.setState({
+      feedState: 'unavailable',
+      feedReason: err instanceof Error ? err.message : 'Live feed unavailable',
+    });
+    return;
+  }
+  socket = ws;
 
   socket.onopen = () => {
     reconnectAttempt = 0;
@@ -143,7 +164,12 @@ export function connect(): void {
               prev === undefined || prev.ltp === t.ltp ? 'flat' : t.ltp > prev.ltp ? 'up' : 'down';
             next[t.s] = { ...t, receivedAt: now, dir };
           }
-          return { ticks: next };
+          // The gateway only reports feed status on connect. A tab opened while
+          // the upstream feed was down stayed on "No live feed" — and ignored
+          // every tick — after the feed came back. Ticks arriving is the proof.
+          return state.feedState === 'connected'
+            ? { ticks: next }
+            : { ticks: next, feedState: 'connected', feedReason: null };
         });
         break;
       }
@@ -157,6 +183,15 @@ export function connect(): void {
           // from our socket being down — surface it as `unavailable`.
           feedState: feed === 'unavailable' ? 'unavailable' : 'connected',
         });
+        break;
+      }
+
+      // Alerts, F&O entry/exit signals and paper-position advice. Previously
+      // these arrived and fell through `default` unread, so nothing the
+      // worker fired was ever shown in the browser.
+      case 'notification': {
+        const n = msg['notification'] as NotificationDto | undefined;
+        if (n) useNotifications.getState().receive(n);
         break;
       }
 

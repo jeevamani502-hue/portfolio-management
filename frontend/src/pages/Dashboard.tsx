@@ -11,6 +11,7 @@ import { IndexCard } from '@/components/market/IndexCard';
 import { BreadthBar } from '@/components/market/BreadthBar';
 import { SectorHeatmap } from '@/components/market/SectorHeatmap';
 import { MoverTable } from '@/components/market/MoverTable';
+import { ActiveSignalsCard } from '@/components/fno/ActiveSignalsCard';
 import { inr, signedPct, signed, pct, humanise, directionClass, relativeTime } from '@/lib/format';
 
 export function Dashboard() {
@@ -252,6 +253,9 @@ export function Dashboard() {
           </CardContent>
         </Card>
       </div>
+
+      {/* Open F&O signals the tracker is following */}
+      <ActiveSignalsCard />
 
       {/* Sectors */}
       <Card>

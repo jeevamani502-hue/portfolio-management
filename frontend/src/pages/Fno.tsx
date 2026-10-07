@@ -10,6 +10,7 @@ import { num, count, countCompact, signed, pct, directionClass, humanise } from 
 import { cn } from '@/lib/utils';
 import type { OptionStrikeDto, OptionChainDto } from '@/types/api';
 import { TradeSetupPanel } from '@/components/fno/TradeSetupPanel';
+import { SignalJournal } from '@/components/fno/SignalJournal';
 
 const UNDERLYINGS = ['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY'] as const;
 
@@ -150,7 +151,8 @@ export function Fno() {
         active={tab}
         onChange={setTab}
         tabs={[
-          { id: 'setup', label: 'Trade setup' },
+          { id: 'setup', label: 'Trade decision' },
+          { id: 'record', label: 'Track record' },
           { id: 'chain', label: 'Option chain' },
           { id: 'levels', label: 'OI levels' },
           { id: 'greeks', label: 'Greeks' },
@@ -161,6 +163,8 @@ export function Fno() {
       {tab === 'setup' && (
         <TradeSetupPanel underlying={underlying} expiry={activeExpiry} />
       )}
+
+      {tab === 'record' && <SignalJournal underlying={underlying} />}
 
       {tab === 'chain' && (
         <Card>

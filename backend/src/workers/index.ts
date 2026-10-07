@@ -26,6 +26,11 @@ import { evaluateAlerts } from './jobs/alertEvaluator.js';
 import { snapshotPortfolios } from './jobs/portfolioValuation.js';
 import { refreshBreadth } from './jobs/breadthRefresh.js';
 import { sweepPaperTrading } from './jobs/paperSweep.js';
+import { trackSignals } from './jobs/signalTracker.js';
+import { runLiveOrders, runLiveAuto } from './jobs/liveTrading.js';
+import {
+  startTickIngest, refreshSubscriptions, stopTickIngest, tickIngestConnected,
+} from './jobs/tickIngest.js';
 
 const log = logger.child({ process: 'worker' });
 
@@ -82,6 +87,30 @@ const JOBS: Job[] = [
     everyMs: 30_000,
     marketHoursOnly: true,
     run: async () => { await evaluateAlerts(await getWorkerRegistry()); },
+  },
+  {
+    // Resolves every active F&O signal against its own plan and says when
+    // to get out. One minute is fine for option premiums checked against
+    // ATR-scaled levels; a tick-level stop is the broker's job, not this one.
+    name: 'signal-tracker',
+    everyMs: 60_000,
+    marketHoursOnly: true,
+    runOnStart: true,
+    run: async () => { await trackSignals(); },
+  },
+  {
+    // Real positions: reconcile with the broker and apply the plan's exits.
+    name: 'live-orders',
+    everyMs: 15_000,
+    marketHoursOnly: true,
+    runOnStart: true,
+    run: async () => { await runLiveOrders(); },
+  },
+  {
+    name: 'live-auto',
+    everyMs: 60_000,
+    marketHoursOnly: true,
+    run: async () => { await runLiveAuto(); },
   },
   {
     name: 'news-poller',
@@ -147,12 +176,44 @@ const leaderToken = randomUUID();
 let isLeader = false;
 let leaderTimer: NodeJS.Timeout | null = null;
 
+/** Do not hammer the broker's login endpoint when the feed will not start. */
+const INGEST_RETRY_MS = 60_000;
+let lastIngestAttempt = 0;
+/** How often the leader re-reads what should be streamed. */
+const SUBSCRIPTION_REFRESH_MS = 120_000;
+let lastSubscriptionRefresh = 0;
+
 async function maintainLeadership(): Promise<void> {
+  // With the in-memory Redis substitute this process's ticks can never reach
+  // the API's websocket clients, so the API runs the ingest itself (see
+  // index.ts). Opening a second upstream socket here only doubled the broker
+  // logins — which is what tripped Angel One's login rate limit at boot and
+  // left the API's feed dead.
+  if (env.USE_IN_MEMORY_REDIS) return;
+
   if (isLeader) {
     const renewed = await renewLock(K.realtimeLeader, leaderToken, LEADER_TTL_MS);
     if (!renewed) {
       isLeader = false;
       log.warn('Lost realtime leadership');
+      return;
+    }
+    // Still the leader but without a socket: the start failed or the feed
+    // dropped. Try again, no more than once a minute.
+    if (!tickIngestConnected() && Date.now() - lastIngestAttempt > INGEST_RETRY_MS) {
+      lastIngestAttempt = Date.now();
+      await startTickIngest().catch((err) => {
+        log.warn({ err }, 'Tick ingest retry failed; will try again');
+        return false;
+      });
+      return;
+    }
+    // Connected: pick up instruments added since the socket opened.
+    if (tickIngestConnected() && Date.now() - lastSubscriptionRefresh > SUBSCRIPTION_REFRESH_MS) {
+      lastSubscriptionRefresh = Date.now();
+      await refreshSubscriptions().catch((err) => {
+        log.warn({ err }, 'Tick subscription refresh failed');
+      });
     }
     return;
   }
@@ -161,18 +222,15 @@ async function maintainLeadership(): Promise<void> {
   if (acquired) {
     isLeader = true;
     log.info('Acquired realtime leadership — this process would hold the upstream feed');
-    // The tick-ingest stream itself is provider-specific and only starts when
-    // a provider with `streamTicks` is configured. None of the shipped
-    // adapters implement the binary socket yet (see README, Roadmap phase 3),
-    // so we hold the lock and log rather than pretending to stream.
-    const streamCapable = (await getWorkerRegistry())
-      .all()
-      .filter((p) => p.isConfigured() && p.manifest.capabilities.includes('streamTicks'));
-    if (streamCapable.length === 0) {
-      log.info(
-        'No configured provider implements streamTicks. Quotes will be served on request via REST rather than streamed; the websocket gateway reports the feed as unavailable so the UI never shows a stale price as live.',
-      );
-    }
+    // Only the leader opens the upstream socket. startTickIngest reports
+    // false when no provider can stream, which is a fallback rather than a
+    // failure: quotes are then fetched on request and the gateway says the
+    // feed is unavailable instead of showing a stale price as live.
+    lastIngestAttempt = Date.now();
+    await startTickIngest().catch((err) => {
+      log.error({ err }, 'Could not start the tick ingest');
+      return false;
+    });
   }
 }
 
@@ -209,6 +267,9 @@ async function main(): Promise<void> {
     );
   }
 
+  if (env.USE_IN_MEMORY_REDIS) {
+    log.info('In-memory Redis: the API process owns the tick feed; this worker will not open an upstream socket.');
+  }
   void maintainLeadership();
   leaderTimer = setInterval(() => void maintainLeadership(), LEADER_TTL_MS / 3);
 
@@ -216,6 +277,9 @@ async function main(): Promise<void> {
     log.info({ signal }, 'Worker shutting down');
     for (const t of timers) clearInterval(t);
     if (leaderTimer) clearInterval(leaderTimer);
+    // Close the broker socket before releasing the lock, so the next leader
+    // does not open a second connection while this one is still attached.
+    await stopTickIngest().catch(() => undefined);
     if (isLeader) await releaseLock(K.realtimeLeader, leaderToken).catch(() => undefined);
     await Promise.allSettled([closeDb(), closeRedis()]);
     process.exit(0);

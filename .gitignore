@@ -12,3 +12,9 @@ coverage/
 *.tsbuildinfo
 pgdata/
 redisdata/
+
+# Production secrets, filled in on the server only.
+.env.prod
+
+# Local service logs written by scripts/restart.mjs
+logs/

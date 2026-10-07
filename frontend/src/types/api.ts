@@ -1020,3 +1020,350 @@ export interface PositionAdviceDto {
   daysToExpiry: number | null;
   thesisIntact: boolean | null;
 }
+
+// ── broker portfolio import ─────────────────────────────────────────────────
+
+export interface ImportSourceDto {
+  id: string;
+  displayName: string;
+}
+
+/**
+ * Result of reconciling broker holdings into a portfolio.
+ *
+ * `skipped` matters as much as the counts: a symbol the instrument master
+ * cannot resolve is reported rather than dropped, so a partial import is
+ * never mistaken for a complete one.
+ */
+export interface ImportResultDto {
+  provider: string;
+  fetched: number;
+  imported: number;
+  updated: number;
+  removed: number;
+  skipped: Array<{ tradingsymbol: string; isin: string | null; reason: string }>;
+  holdings: Array<{ symbol: string; quantity: number; averagePrice: number; invested: number }>;
+  /** The service's own plain-language summary of what it did. */
+  note: string;
+}
+
+// ── charting ────────────────────────────────────────────────────────────────
+
+/**
+ * One indicator series, aligned index-for-index with the candles.
+ * `null` marks the warm-up period; the chart skips those rather than
+ * drawing a line down to zero.
+ */
+export interface IndicatorLineDto {
+  id: string;
+  label: string;
+  values: Array<number | null>;
+  pane: 'price' | 'rsi' | 'macd' | 'atr' | 'adx';
+  /** What the indicator is, in plain words. Shown on hover. */
+  note: string;
+}
+
+export interface ChartDto {
+  symbol: string;
+  name: string | null;
+  timeframe: string;
+  candles: CandleDto[];
+  indicators: IndicatorLineDto[];
+}
+
+// ── paper engine status ─────────────────────────────────────────────────────
+
+/** One reason the engine cannot currently open a position. */
+export interface PaperBlockerDto {
+  code: string;
+  detail: string;
+  fix?: string;
+}
+
+/**
+ * Answers "is it running, and why has nothing traded" — which the config
+ * alone cannot, because enabled-but-unable-to-trade is the common case.
+ */
+export interface PaperStatusDto {
+  state: 'NOT_SET_UP' | 'STOPPED' | 'HALTED' | 'WAITING' | 'WATCHING';
+  headline: string;
+  blockers: PaperBlockerDto[];
+  marketPhase: string;
+  marketOpen: boolean;
+  feedConnected: boolean;
+  capital: number | null;
+  lotEconomics: Array<{
+    underlying: string;
+    lotSize: number | null;
+    riskBudget: number;
+    note: string;
+  }>;
+  watching: string[];
+  openPositions: number;
+  tradesToday: number;
+  lastSweepAt: string | null;
+  lastSweepSummary: string | null;
+  lastSweepSkipped: string[];
+  nextSweepInSeconds: number | null;
+}
+
+// ── F&O decision engine ─────────────────────────────────────────────────────
+
+export type FnoGrade = 'A' | 'B' | 'C' | 'NONE';
+export type FnoStance = 'ENTER' | 'WAIT' | 'AVOID';
+
+/** One line of the decision checklist, with the observation behind it. */
+export interface DecisionFactorDto {
+  id: string;
+  label: string;
+  group: 'direction' | 'timing' | 'chain' | 'volatility' | 'risk';
+  verdict: 'pass' | 'fail' | 'na';
+  weight: number;
+  observed: string;
+  gate: boolean;
+}
+
+export interface TradePlanDto {
+  entryPremium: number;
+  entryZone: { low: number; high: number };
+  stopPremium: number;
+  target1Premium: number;
+  target2Premium: number;
+  underlyingEntry: number;
+  underlyingStop: number;
+  underlyingTarget1: number;
+  underlyingTarget2: number;
+  rewardRisk1: number | null;
+  rewardRisk2: number | null;
+  lots: number;
+  quantity: number;
+  premiumOutlay: number;
+  riskAtStop: number;
+  timeStop: string;
+  exitRules: string[];
+}
+
+/**
+ * The graded decision. `score` is the weighted share of readable checklist
+ * conditions that agree and `grade` is a band on it — a count, never a
+ * probability. The UI must not present either as odds.
+ */
+export interface FnoDecisionDto {
+  underlying: string;
+  expiry: string;
+  daysToExpiry: number;
+  bias: 'BULLISH' | 'BEARISH' | 'NEUTRAL';
+  stance: FnoStance;
+  grade: FnoGrade;
+  action: 'BUY_CALL' | 'BUY_PUT' | 'NO_TRADE';
+  score: number;
+  coverage: number;
+  factors: DecisionFactorDto[];
+  gatesFailed: string[];
+  entryWindowOpen: boolean;
+  sessionNote: string;
+  setup: OptionSetupDto;
+  plan: TradePlanDto | null;
+  whatChangesMyMind: string[];
+  summary: string;
+  holdBecause: string[];
+}
+
+export type FnoSignalStatus =
+  | 'ACTIVE' | 'TARGET1_HIT' | 'TARGET2_HIT' | 'STOPPED' | 'INVALIDATED' | 'EXPIRED' | 'TIMED_OUT';
+
+export interface FnoSignalDto {
+  id: number;
+  underlying: string;
+  expiry: string;
+  strike: number;
+  optionType: 'CE' | 'PE';
+  tradingsymbol: string | null;
+  action: 'BUY_CALL' | 'BUY_PUT';
+  grade: 'A' | 'B' | 'C';
+  score: number;
+  spot: number;
+  entryPremium: number;
+  stopPremium: number;
+  target1Premium: number;
+  target2Premium: number | null;
+  underlyingStop: number;
+  underlyingTarget1: number;
+  underlyingTarget2: number | null;
+  origin: 'alert' | 'paper' | 'manual';
+  status: FnoSignalStatus;
+  lastPremium: number | null;
+  maxFavourablePremium: number | null;
+  maxAdversePremium: number | null;
+  rMultiple: number | null;
+  notes: string | null;
+  generatedAt: string;
+  lastCheckedAt: string | null;
+  resolvedAt: string | null;
+  source: string;
+  dataAsOf: string;
+}
+
+export interface GradeStatsDto {
+  grade: string;
+  issued: number;
+  resolved: number;
+  active: number;
+  wins: number;
+  losses: number;
+  hitRatePct: number | null;
+  avgR: number | null;
+  profitFactor: number | null;
+  avgMaxFavourableR: number | null;
+}
+
+export interface SignalPerformanceDto {
+  byGrade: GradeStatsDto[];
+  issued: number;
+  resolved: number;
+  sinceDays: number;
+  caveat: string;
+  method: string;
+}
+
+// ── live trading ────────────────────────────────────────────────────────────
+
+export type LiveMode = 'OFF' | 'CONFIRM' | 'AUTO';
+
+/** Numeric columns arrive as strings from pg; the UI coerces at the edge. */
+export interface LiveConfigDto {
+  user_id: string;
+  mode: LiveMode;
+  armed_until: string | null;
+  capital: string | null;
+  risk_per_trade_pct: string;
+  max_open_positions: number;
+  max_lots_per_trade: number;
+  max_trades_per_day: number;
+  max_daily_loss_pct: string;
+  underlyings: string[];
+  min_grade: 'A' | 'B' | 'C';
+  allow_expiry_day: boolean;
+  window_start_min: number;
+  window_end_min: number;
+  square_off_min: number;
+  product: 'INTRADAY' | 'CARRYFORWARD';
+  scale_out: boolean;
+  entry_timeout_sec: number;
+  kill_switch: boolean;
+  halted_reason: string | null;
+  halted_at: string | null;
+  last_sweep_at: string | null;
+  last_sweep_result: { placed?: number; skipped?: string[] } | null;
+}
+
+export interface LiveConfigInput {
+  mode: LiveMode;
+  riskPerTradePct: number;
+  maxOpenPositions: number;
+  maxLotsPerTrade: number;
+  maxTradesPerDay: number;
+  maxDailyLossPct: number;
+  underlyings: string[];
+  minGrade: 'A' | 'B' | 'C';
+  allowExpiryDay: boolean;
+  windowStartMin: number;
+  windowEndMin: number;
+  squareOffMin: number;
+  product: 'INTRADAY' | 'CARRYFORWARD';
+  scaleOut: boolean;
+  entryTimeoutSec: number;
+}
+
+export interface LiveBlockerDto {
+  code: string;
+  detail: string;
+  fix?: string;
+}
+
+export interface LiveStatusDto {
+  config: LiveConfigDto | null;
+  armed: boolean;
+  blockers: LiveBlockerDto[];
+  openPositions: number;
+  tradesToday: number;
+  netPnlToday: number;
+  marketPhase: string;
+  brokerReady: boolean;
+  broker: string | null;
+  headline: string;
+}
+
+export type LiveTradeStatus = 'PENDING' | 'OPEN' | 'EXITING' | 'CLOSED' | 'FAILED';
+
+export interface LiveTradeDto {
+  id: string;
+  mode: 'CONFIRM' | 'AUTO';
+  broker: string;
+  tradingsymbol: string;
+  exchange: string;
+  underlying: string;
+  expiry: string;
+  strike: string;
+  option_type: 'CE' | 'PE';
+  action: 'BUY_CALL' | 'BUY_PUT';
+  product: 'INTRADAY' | 'CARRYFORWARD';
+  lot_size: number;
+  lots: number;
+  quantity: number;
+  entry_order_id: string | null;
+  entry_order_status: string;
+  entry_limit: string | null;
+  entry_price: string | null;
+  entry_filled_qty: number;
+  entry_placed_at: string;
+  entry_at: string | null;
+  grade: string;
+  score: number;
+  stop_premium: string;
+  target1_premium: string;
+  target2_premium: string;
+  underlying_stop: string;
+  remaining_qty: number;
+  t1_done: boolean;
+  exit_order_status: string | null;
+  exit_code: string | null;
+  exits: Array<{ qty: number; price: number; at: string; code: string; reason: string }>;
+  last_premium: string | null;
+  gross_pnl: string | null;
+  costs: string | null;
+  net_pnl: string | null;
+  closed_at: string | null;
+  status: LiveTradeStatus;
+  failure_reason: string | null;
+  created_at: string;
+}
+
+export interface LivePerformanceDto {
+  closed: number;
+  wins: number;
+  losses: number;
+  winRate: number | null;
+  grossPnl: number;
+  costs: number;
+  netPnl: number;
+  best: number | null;
+  worst: number | null;
+  profitFactor: number | null;
+  todayNet: number;
+  caveat: string;
+}
+
+// ── notifications ───────────────────────────────────────────────────────────
+
+export interface NotificationDto {
+  id: number;
+  kind: 'alert' | 'fno_entry' | 'fno_exit' | 'paper_advice' | 'live' | 'system';
+  severity: 'info' | 'action' | 'warning';
+  title: string;
+  message: string;
+  payload: Record<string, unknown>;
+  link: string | null;
+  createdAt: string;
+  readAt: string | null;
+}

@@ -18,6 +18,7 @@ import { Watchlist } from '@/pages/Watchlist';
 import { News } from '@/pages/News';
 import { Alerts } from '@/pages/Alerts';
 import { PaperTrading } from '@/pages/PaperTrading';
+import { LiveTrading } from '@/pages/LiveTrading';
 import { Backtesting } from '@/pages/Backtesting';
 import { AiAnalyst } from '@/pages/AiAnalyst';
 import { Settings } from '@/pages/Settings';
@@ -97,6 +98,7 @@ export function App() {
                 <Route path="news" element={<News />} />
                 <Route path="alerts" element={<Alerts />} />
                 <Route path="paper" element={<PaperTrading />} />
+                <Route path="live" element={<LiveTrading />} />
                 <Route path="backtest" element={<Backtesting />} />
                 <Route path="analyst" element={<AiAnalyst />} />
                 <Route path="settings" element={<Settings />} />

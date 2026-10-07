@@ -12,7 +12,7 @@
     "build": "npm run build -w backend && npm run build -w frontend",
     "migrate": "npm run migrate -w backend",
     "seed": "npm run seed -w backend",
-    "test": "npm run test -w backend",
+    "test": "npm run test -w backend && npm run test -w frontend",
     "lint:safety": "node scripts/banned-phrases.mjs",
     "kite:token": "node scripts/kite-access-token.mjs",
     "restart": "node scripts/restart.mjs",

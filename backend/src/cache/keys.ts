@@ -7,6 +7,10 @@ export const K = {
   tickChannel: (instrumentId: number | string) => `ticks:${instrumentId}`,
   /** Pattern the WS gateway subscribes to. */
   tickChannelPattern: 'ticks:*',
+  /** Latest streamed price per instrument, kept warm by the tick ingest. */
+  streamTick: (instrumentId: number | string) => `st:${instrumentId}`,
+  /** Whether the worker currently holds a live upstream feed. */
+  feedStatus: 'feed:status',
   /** Broadcast channels. */
   breadthChannel: 'bcast:breadth',
   signalChannel: 'bcast:signals',

@@ -458,15 +458,24 @@ export async function persistCandles(
     const tuples: string[] = [];
     batch.forEach((c, idx) => {
       const b = idx * 9;
+      // Every column needs an explicit cast, not just the timestamp.
+      // PostgreSQL infers parameter types from the first row of a multi-row
+      // VALUES list and defaults anything untyped to text, so this failed
+      // with "column instrument_id is of type bigint but expression is of
+      // type text" — silently, in a catch, on every single batch. Nothing
+      // was ever cached, so every chart and every scanner sweep re-fetched
+      // from the broker and eventually tripped its rate limit.
       tuples.push(
-        `($${b + 1},$${b + 2},$${b + 3}::timestamptz,$${b + 4},$${b + 5},$${b + 6},$${b + 7},$${b + 8},$${b + 9})`,
+        `($${b + 1}::bigint,$${b + 2}::text,$${b + 3}::timestamptz,` +
+        `$${b + 4}::numeric,$${b + 5}::numeric,$${b + 6}::numeric,$${b + 7}::numeric,` +
+        `$${b + 8}::bigint,$${b + 9}::numeric)`,
       );
       values.push(instrumentId, timeframe, c.ts, c.open, c.high, c.low, c.close, c.volume, c.oi);
     });
     try {
       await query(
         `INSERT INTO candles (instrument_id, timeframe, ts, open, high, low, close, volume, oi, source)
-         SELECT v.*, $${values.length + 1} FROM (VALUES ${tuples.join(',')}) AS v(
+         SELECT v.*, $${values.length + 1}::text FROM (VALUES ${tuples.join(',')}) AS v(
            instrument_id, timeframe, ts, open, high, low, close, volume, oi)
          ON CONFLICT (instrument_id, timeframe, ts) DO UPDATE SET
            open = EXCLUDED.open, high = EXCLUDED.high, low = EXCLUDED.low,
@@ -475,7 +484,10 @@ export async function persistCandles(
         [...values, source],
       );
     } catch (err) {
-      logger.warn({ err, instrumentId, timeframe }, 'Failed to persist candle batch');
+      logger.error(
+        { err, instrumentId, timeframe, bars: batch.length },
+        'Failed to persist candle batch — every later request will re-fetch from the provider and count against its rate limit.',
+      );
     }
   }
 }

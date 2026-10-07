@@ -11,12 +11,12 @@ import {
   type IChartApi, type ISeriesApi, type UTCTimestamp, type LineData, type CandlestickData,
 } from 'lightweight-charts';
 import type { CandleDto } from '@/types/api';
+import { hslToRgba, chartColor } from './color';
 
-/** Read an HSL custom property and return a CSS colour string. */
-function cssVar(name: string, alpha?: number): string {
+/** Read a theme custom property as a colour the chart library can parse. */
+function cssVar(name: string, alpha = 1): string {
   const raw = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
-  if (!raw) return alpha !== undefined ? `rgba(128,128,128,${alpha})` : '#808080';
-  return alpha !== undefined ? `hsl(${raw} / ${alpha})` : `hsl(${raw})`;
+  return hslToRgba(raw, alpha) ?? `rgba(128, 128, 128, ${alpha})`;
 }
 
 export interface Overlay {
@@ -33,12 +33,19 @@ export function CandleChart({
   overlays = [],
   height = 400,
   showVolume = true,
+  showCandles = true,
   priceLines = [],
 }: {
   candles: CandleDto[];
   overlays?: Overlay[];
   height?: number;
   showVolume?: boolean;
+  /**
+   * Draw the candlesticks. Off for an oscillator pane, where the series
+   * shares the x-axis but not the y-scale — RSI plotted against price would
+   * flatten both into unreadable lines.
+   */
+  showCandles?: boolean;
   priceLines?: Array<{ price: number; label: string; color: string; dashed?: boolean }>;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -81,23 +88,26 @@ export function CandleChart({
     const toTime = (iso: string): UTCTimestamp =>
       Math.floor(new Date(iso).getTime() / 1000) as UTCTimestamp;
 
-    const candleSeries: ISeriesApi<'Candlestick'> = chart.addCandlestickSeries({
-      upColor,
-      downColor,
-      borderUpColor: upColor,
-      borderDownColor: downColor,
-      wickUpColor: upColor,
-      wickDownColor: downColor,
-    });
+    let candleSeries: ISeriesApi<'Candlestick'> | null = null;
+    if (showCandles) {
+      candleSeries = chart.addCandlestickSeries({
+        upColor,
+        downColor,
+        borderUpColor: upColor,
+        borderDownColor: downColor,
+        wickUpColor: upColor,
+        wickDownColor: downColor,
+      });
 
-    const candleData: CandlestickData[] = candles.map((c) => ({
-      time: toTime(c.ts),
-      open: c.open,
-      high: c.high,
-      low: c.low,
-      close: c.close,
-    }));
-    candleSeries.setData(candleData);
+      const candleData: CandlestickData[] = candles.map((c) => ({
+        time: toTime(c.ts),
+        open: c.open,
+        high: c.high,
+        low: c.low,
+        close: c.close,
+      }));
+      candleSeries.setData(candleData);
+    }
 
     if (showVolume) {
       const volumeSeries = chart.addHistogramSeries({
@@ -122,7 +132,7 @@ export function CandleChart({
 
     for (const overlay of overlays) {
       const series = chart.addLineSeries({
-        color: overlay.color,
+        color: chartColor(overlay.color),
         lineWidth: overlay.lineWidth ?? 2,
         priceLineVisible: false,
         lastValueVisible: false,
@@ -137,15 +147,19 @@ export function CandleChart({
       series.setData(data);
     }
 
-    for (const line of priceLines) {
-      candleSeries.createPriceLine({
-        price: line.price,
-        color: line.color,
-        lineWidth: 1,
-        lineStyle: line.dashed ? 2 : 0,
-        axisLabelVisible: true,
-        title: line.label,
-      });
+    // Price lines hang off the candle series, so there is nowhere to put
+    // them in a lines-only pane.
+    if (candleSeries) {
+      for (const line of priceLines) {
+        candleSeries.createPriceLine({
+          price: line.price,
+          color: chartColor(line.color),
+          lineWidth: 1,
+          lineStyle: line.dashed ? 2 : 0,
+          axisLabelVisible: true,
+          title: line.label,
+        });
+      }
     }
 
     chart.timeScale().fitContent();
@@ -162,7 +176,7 @@ export function CandleChart({
       chartRef.current = null;
     };
     // Re-create on data or overlay identity change; cheap at these sizes.
-  }, [candles, overlays, height, showVolume, priceLines]);
+  }, [candles, overlays, height, showVolume, showCandles, priceLines]);
 
   if (candles.length === 0) {
     return (

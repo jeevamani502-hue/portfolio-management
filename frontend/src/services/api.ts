@@ -218,6 +218,19 @@ export const api = {
     peers: (symbol: string) => request<PeersDto>(`/stocks/${encodeURIComponent(symbol)}/peers`),
   },
 
+  marketChart: {
+    /** Candles and indicator series in one response, aligned index-for-index. */
+    get: (symbol: string, o: { tf: string; overlays?: string[]; panes?: string[]; bars?: number }) =>
+      requestWithMeta<ChartDto>(`/market/chart/${encodeURIComponent(symbol)}`, {
+        query: {
+          tf: o.tf,
+          ...(o.bars ? { bars: String(o.bars) } : {}),
+          ...(o.overlays?.length ? { overlays: o.overlays.join(',') } : {}),
+          ...(o.panes?.length ? { panes: o.panes.join(',') } : {}),
+        },
+      }),
+  },
+
   options: {
     expiries: (symbol: string) => request<Sourced<string[]>>(`/options/${symbol}/expiries`),
     chain: (symbol: string, expiry?: string) =>
@@ -265,10 +278,86 @@ export const api = {
     close: (id: string) =>
       request<{ closed: boolean }>(`/paper/trades/${id}/close`, { method: 'POST' }),
     advice: () => request<PositionAdviceDto[]>('/paper/advice'),
+    status: () => request<PaperStatusDto>('/paper/status'),
     take: (underlying: string) =>
       request<{ opened: boolean; underlying: string }>('/paper/take', {
         method: 'POST', body: { underlying },
       }),
+  },
+
+  fno: {
+    /**
+     * The graded decision checklist. Capital and risk are required — the
+     * server sizes nothing without them and assumes no account size.
+     */
+    decision: (
+      symbol: string,
+      params: {
+        capital: number; riskPercent: number; expiry?: string;
+        biasTimeframe?: '1h' | '1d'; entryTimeframe?: '5m' | '15m' | '1h'; record?: boolean;
+      },
+    ) =>
+      requestWithMeta<Sourced<FnoDecisionDto>>(`/fno/${symbol}/decision`, {
+        query: {
+          capital: String(params.capital),
+          riskPercent: String(params.riskPercent),
+          ...(params.expiry ? { expiry: params.expiry } : {}),
+          ...(params.biasTimeframe ? { biasTimeframe: params.biasTimeframe } : {}),
+          ...(params.entryTimeframe ? { entryTimeframe: params.entryTimeframe } : {}),
+          ...(params.record === false ? { record: 'false' } : {}),
+        },
+      }),
+    signals: (params: { status?: 'ACTIVE' | 'RESOLVED'; underlying?: string; limit?: number } = {}) =>
+      request<FnoSignalDto[]>('/fno/signals', {
+        query: {
+          ...(params.status ? { status: params.status } : {}),
+          ...(params.underlying ? { underlying: params.underlying } : {}),
+          ...(params.limit ? { limit: String(params.limit) } : {}),
+        },
+      }),
+    performance: (sinceDays = 90) =>
+      request<SignalPerformanceDto>('/fno/signals/performance', { query: { sinceDays } }),
+  },
+
+  live: {
+    status: () => request<LiveStatusDto>('/live/status'),
+    config: () => request<LiveConfigDto | null>('/live/config'),
+    saveConfig: (body: Partial<LiveConfigInput>) =>
+      request<LiveConfigDto>('/live/config', { method: 'PUT', body }),
+    arm: (capital: number) => request<LiveConfigDto>('/live/arm', { method: 'POST', body: { capital } }),
+    disarm: () => request<{ disarmed: boolean }>('/live/disarm', { method: 'POST' }),
+    kill: () => request<{ cancelled: number; exits: number }>('/live/kill', { method: 'POST' }),
+    resetKill: () => request<{ reset: boolean }>('/live/kill/reset', { method: 'POST' }),
+    execute: (underlying: string) =>
+      request<{ placed: boolean; reason: string; tradeId: number | null; orderId: string | null }>(
+        '/live/execute', { method: 'POST', body: { underlying } },
+      ),
+    trades: (params: { status?: 'ACTIVE' | 'CLOSED'; limit?: number } = {}) =>
+      request<LiveTradeDto[]>('/live/trades', {
+        query: {
+          ...(params.status ? { status: params.status } : {}),
+          ...(params.limit ? { limit: String(params.limit) } : {}),
+        },
+      }),
+    close: (id: string) => request<{ ok: boolean; reason: string }>(`/live/trades/${id}/close`, { method: 'POST' }),
+    sync: () => request<{ synced: boolean }>('/live/sync', { method: 'POST' }),
+    performance: () => request<LivePerformanceDto>('/live/performance'),
+  },
+
+  notifications: {
+    list: (params: { limit?: number; unread?: boolean } = {}) =>
+      request<{ items: NotificationDto[]; unreadCount: number }>('/notifications', {
+        query: {
+          ...(params.limit ? { limit: String(params.limit) } : {}),
+          ...(params.unread ? { unread: 'true' } : {}),
+        },
+      }),
+    markRead: (ids: number[]) =>
+      request<{ updated: number }>('/notifications/read', { method: 'POST', body: { ids } }),
+    markAllRead: () =>
+      request<{ updated: number }>('/notifications/read', { method: 'POST', body: { all: true } }),
+    test: () =>
+      request<{ sent: boolean; sessions: number }>('/notifications/test', { method: 'POST' }),
   },
 
   scanner: {
@@ -290,6 +379,12 @@ export const api = {
     addTransaction: (id: string, body: Record<string, unknown>) =>
       request<{ id: string }>(`/portfolio/${id}/transaction`, { method: 'POST', body }),
     transactions: (id: string) => request<unknown[]>(`/portfolio/${id}/transactions`),
+    /** Brokers that are configured AND can actually supply holdings. */
+    importSources: () => request<ImportSourceDto[]>('/portfolio/import/sources'),
+    importFrom: (id: string, provider: string, removeMissing = false) =>
+      request<ImportResultDto>(`/portfolio/${id}/import/${provider}`, {
+        method: 'POST', body: { removeMissing },
+      }),
   },
 
   watchlists: {
@@ -367,9 +462,13 @@ import type {
   QuoteDto, InstrumentDto, CandleDto, StockAnalysisDto, FundamentalsDto, NewsDto,
   PeersDto, OptionChainDto, OptionAnalyticsDto, OptionSetupDto, FuturesDto, ScanResultDto, PortfolioDto,
   PaperConfigDto, PaperConfigInput, PaperPerformanceDto, PaperTradeDto, PaperSweepDto,
-  PositionAdviceDto,
+  ChartDto,
+  ImportSourceDto, ImportResultDto,
+  PositionAdviceDto, PaperStatusDto,
   HealthDto, HoldingDto, PortfolioAnalysisDto, WatchlistDto, WatchlistRowDto,
   NewsImpactDto, PositionSizeDto, AnalystResponseDto, AlertDto, AlertKindDto,
   StrategyDto, BacktestRunDto, SettingsDto, ProviderCatalogueDto, ConfiguredProviderDto,
   DataQualityEventDto,
+  FnoDecisionDto, FnoSignalDto, SignalPerformanceDto, NotificationDto,
+  LiveStatusDto, LiveConfigDto, LiveConfigInput, LiveTradeDto, LivePerformanceDto,
 } from '@/types/api';

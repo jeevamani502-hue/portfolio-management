@@ -26,13 +26,9 @@ import { registryForUser } from '../../providers/registry.js';
 import * as instrumentsRepo from '../../db/repositories/instruments.js';
 import type { InstrumentRow } from '../../db/repositories/instruments.js';
 import { getQuote } from '../market/marketData.service.js';
-import { getCandles } from '../market/marketData.service.js';
 import { isAvailable } from '../../utils/sourced.js';
-import { buildSnapshot } from '../../analysis/snapshot.js';
-import { runSignalEngine } from '../../analysis/signals/engine.js';
-import { buildOptionSetup } from '../../analysis/options/setupEngine.js';
 import { calculateRoundTripCosts, type Segment } from '../../analysis/backtest/costs.js';
-import { getExpiries, getOptionChain, underlyingInstrumentFor } from '../options/options.service.js';
+import { evaluateUnderlying } from '../fno/fno.service.js';
 
 const log = logger.child({ module: 'paper' });
 
@@ -294,55 +290,65 @@ export async function runEntrySweep(userId: string): Promise<SweepResult> {
     }
   }
 
+  // Record the outcome so the UI can say what the engine decided and why,
+  // rather than leaving "running with no trades" indistinguishable from
+  // "never ran".
+  await query(
+    `UPDATE paper_trade_config
+        SET last_sweep_at = now(), last_sweep_result = $2::jsonb, updated_at = now()
+      WHERE user_id = $1`,
+    [userId, JSON.stringify({ considered, opened, skipped })],
+  );
+
   return { considered, opened, skipped };
 }
 
+/**
+ * The entry decision comes from the F&O decision engine — the same graded
+ * checklist the F&O page and the alerts use — so a trade the simulation
+ * takes is one the user would have been shown, with the same plan.
+ */
 async function tryOpenOptionTrade(
   registry: ProviderRegistry,
   cfg: PaperConfig,
   underlying: string,
 ): Promise<{ opened: boolean; reason: string }> {
-  const expiries = await getExpiries(registry, underlying);
-  if (!isAvailable(expiries) || expiries.value.length === 0) {
-    return { opened: false, reason: 'no expiries listed' };
-  }
-  const expiry = expiries.value[0]!;
-
-  const chain = await getOptionChain(registry, underlying, expiry);
-  if (!isAvailable(chain)) return { opened: false, reason: chain.detail ?? 'chain unavailable' };
-
-  const spotInstrument = await instrumentsRepo.resolveSymbol(underlyingInstrumentFor(underlying));
-  if (!spotInstrument) return { opened: false, reason: 'underlying not in the instrument master' };
-
-  const candles = await getCandles(registry, spotInstrument, '1d', { bars: 300 });
-  if (candles.candles.length < 30) {
-    return { opened: false, reason: `only ${candles.candles.length} bars of history` };
-  }
-  const snapshot = buildSnapshot(spotInstrument.tradingsymbol, '1d', candles.candles);
-
-  const setup = buildOptionSetup({
-    underlying,
-    chain: chain.value,
-    signal: runSignalEngine(snapshot),
-    atr: snapshot.volatility.atr14,
+  const evaluation = await evaluateUnderlying(registry, underlying, {
     capital: Number(cfg.capital),
     riskPercent: Number(cfg.risk_per_trade_pct),
+    record: { userId: cfg.user_id, origin: 'paper' },
   });
-
-  if (setup.action === 'NO_TRADE') {
-    return { opened: false, reason: setup.rejectedBecause[0] ?? 'no setup' };
+  if (!isAvailable(evaluation.result) || !evaluation.expiry) {
+    const r = evaluation.result;
+    return { opened: false, reason: (isAvailable(r) ? null : r.detail ?? r.reason) ?? 'decision unavailable' };
   }
-  if (setup.confirmation < cfg.min_confirmation) {
+  const decision = evaluation.result.value;
+  const expiry = evaluation.expiry;
+
+  if (decision.stance !== 'ENTER' || !decision.plan) {
     return {
       opened: false,
-      reason: `confirmation ${setup.confirmation} below the ${cfg.min_confirmation} threshold`,
+      reason: `grade ${decision.grade} — ${decision.holdBecause[0] ?? 'the checklist does not support an entry'}`,
     };
   }
+  if (!decision.entryWindowOpen) {
+    return { opened: false, reason: decision.sessionNote };
+  }
+  if (decision.score < cfg.min_confirmation) {
+    return {
+      opened: false,
+      reason: `checklist score ${decision.score} below the ${cfg.min_confirmation} threshold`,
+    };
+  }
+  const setup = decision.setup;
 
   // Resolve the actual contract so the fill comes from its own quote, not
   // the chain snapshot — the chain may be a few seconds old.
+  // Prefer the spelling of the contract that the brokers actually configured
+  // can price; the fill below is simulated from that row's own quote.
   const contract = await instrumentsRepo.findOptionContract(
     underlying, expiry, setup.strike!, setup.optionType!,
+    registry.candidates('quote').map((p) => p.manifest.id),
   );
   if (!contract) return { opened: false, reason: 'contract not found in the master' };
 
@@ -368,7 +374,11 @@ async function tryOpenOptionTrade(
       cfg.user_id, contract.id, contract.tradingsymbol, contract.exchange, underlying,
       setup.sizing!.quantity, setup.lotSize, fill.price, fill.reference,
       setup.stopPremium, setup.targetPremium, setup.underlyingStop,
-      setup.confirmation, setup.interpretation, JSON.stringify(setup.evidence),
+      decision.score, decision.summary,
+      JSON.stringify({
+        grade: decision.grade, score: decision.score, factors: decision.factors,
+        plan: decision.plan, evidence: setup.evidence, signalId: evaluation.signalId,
+      }),
     ],
   );
 

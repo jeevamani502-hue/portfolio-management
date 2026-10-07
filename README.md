@@ -131,6 +131,23 @@ Full analysis in [`docs/ARCHITECTURE.md` § B](docs/ARCHITECTURE.md). Short vers
 
 ---
 
+## Hosting it
+
+[`docs/DEPLOY-ORACLE.md`](docs/DEPLOY-ORACLE.md) — the whole stack on one VM,
+free and always on.
+
+Most free tiers sleep after a few minutes idle, and when the process sleeps
+the background worker stops: no scanner sweeps, no news polling, no alert
+evaluation, no paper-trade exits. That is most of what this platform does, so
+a host that keeps a process running matters more here than raw resources.
+Oracle Cloud Always Free is the option that does.
+
+[`render.yaml`](render.yaml) deploys the same stack to Render if you would
+rather not run a VM — with the caveat above, and a free PostgreSQL instance
+that expires after 30 days.
+
+---
+
 ## Commands
 
 | Command | What it does |
@@ -138,7 +155,7 @@ Full analysis in [`docs/ARCHITECTURE.md` § B](docs/ARCHITECTURE.md). Short vers
 | `npm run dev` | API + web, both with hot reload |
 | `npm run dev:worker -w backend` | Background job runner |
 | `npm run build` | Production build of both |
-| `npm test` | Backend unit tests (152) |
+| `npm test` | Backend unit tests (286) + frontend (14) |
 | `npm run migrate` / `migrate:status` | Database migrations |
 | `npm run seed -w backend` | Reference data (indices, sectors, holidays) |
 | `npm run lint:safety` | **Financial-safety linter** — fails on guarantee-style language |
@@ -192,6 +209,55 @@ README is itself linted, which is why it describes the patterns rather than spel
 Every score is "how many rule-based conditions currently agree, weighted" — never a probability.
 The UI expands any score into the exact rules behind it, each with the observed value that made it
 pass or fail.
+
+**9. The F&O track record is measured, not claimed.**
+Every ENTER-grade option signal is written to a journal with its plan at issue, and a tracker
+resolves it against real quotes — stop, invalidation, targets, expiry, time stop. The hit rate and
+average R shown per grade are computed from those rows and nothing else, and carry a sample-size
+caveat until at least thirty have resolved.
+
+---
+
+## The F&O decision engine
+
+Buying an index call or put is decided the way a discretionary trader decides it — as a checklist
+across five groups, not a single score — and the whole checklist is shown with the number that
+decided each line ([`decisionEngine.ts`](backend/src/analysis/options/decisionEngine.ts)):
+
+| Group | What has to be true |
+|---|---|
+| **Direction** | The daily rule score has a side (≥ 60 bullish, ≤ 40 bearish — a gate); swing structure and a named setup agree; momentum is not already stretched; the broad-market regime is not fighting it |
+| **Timing** | The 15-minute score has turned the same way; price is on the right side of session VWAP; the intraday Supertrend agrees; the session is moving that way; the entry is inside 09:30–15:00 IST |
+| **Chain flow** | PCR reads with the bias; max pain sits on the trade's side; today's OI additions favour it; there is room to the nearest OI wall |
+| **Volatility** | IV percentile is not at the rich end; India VIX is not elevated; at least two calendar days to expiry (a gate — the engine rolls to the next expiry itself) |
+| **Risk** | A contract can be priced, stopped and sized from the capital entered (a gate); it survives to its own stop; the outlay is a sane share of capital; the strike is liquid |
+
+A failed gate means no trade whatever the rest says. Otherwise the score is the weighted share of
+*readable* factors that agree — an unavailable input lowers coverage rather than counting either
+way — and maps to a grade: **A** (≥ 75, structure and timing clean) or **B** (≥ 60) is *Enter*,
+**C** (≥ 45) is *Wait*, anything else is *No trade*. Coverage under 60% caps the grade at C.
+
+An Enter decision carries a full plan: entry zone inside the quoted spread, a nominal premium stop
+and the real invalidation level on the underlying, two targets (1.5R and 2.5R), lots sized from
+the capital entered, a time stop, and the exits in the order to apply them. The panel also lists
+what would change the read.
+
+The same engine drives three things:
+
+- **F&O page → Trade decision** — run the checklist for NIFTY / BANKNIFTY / FINNIFTY / MIDCPNIFTY.
+- **`FNO_SETUP` alerts** — re-run every 30 s in market hours; fire once per new Enter-grade
+  contract at or above the chosen grade. "Alert me on … setups" on the F&O page creates one.
+- **Paper trading** — opens a simulated position only on an Enter decision inside the entry window.
+
+**When to sell** is the signal tracker ([`signalTracker.ts`](backend/src/workers/jobs/signalTracker.ts)):
+every minute it prices each journaled signal and notifies on target 1 (book half, stop to entry),
+target 2, stop, invalidation, expiry and the time stop — plus one warning when the premium is 70%
+of the way to the stop and one when expiry is a day away.
+
+**Notifications** are persisted before they are pushed
+([`notifications.service.ts`](backend/src/modules/notifications/notifications.service.ts)), so an
+alert that fires while the browser is closed is waiting under the bell on the next visit. Desktop
+notifications are opt-in from the bell; a "send test" button confirms they work.
 
 ---
 

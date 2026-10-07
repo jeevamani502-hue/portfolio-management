@@ -13,6 +13,7 @@ import { pingDb, hasTimescale, closeDb } from './db/pool.js';
 import { pingRedis, closeRedis } from './cache/redis.js';
 import { getRegistry } from './providers/registry.js';
 import { attachWebSocketServer } from './websocket/server.js';
+import { startTickIngest, refreshSubscriptions } from './workers/jobs/tickIngest.js';
 import { formatIstDateTime } from './utils/time.js';
 
 async function main(): Promise<void> {
@@ -72,6 +73,49 @@ async function main(): Promise<void> {
   const app = createApp();
   const server = createServer(app);
   attachWebSocketServer(server);
+
+  /*
+   * With the in-process Redis substitute there is no shared pub/sub: the
+   * worker's publishes land in its own memory and never reach this process,
+   * so a tick fanned out from there could never arrive in a browser. In that
+   * configuration the ingest has to run where the subscribers are.
+   *
+   * With a real Redis this stays off and the worker owns the socket under a
+   * leader lock, which is the arrangement that survives more than one API
+   * process.
+   */
+  if (env.USE_IN_MEMORY_REDIS) {
+    // Retried with backoff, not attempted once. The single attempt used to
+    // race the worker's own broker login at boot and lose to Angel One's
+    // login rate limit — and a failed start was permanent, so the header
+    // read "No live feed" until someone restarted the API by hand.
+    const startInProcessIngest = async (attempt: number): Promise<void> => {
+      try {
+        const started = await startTickIngest();
+        if (started) {
+          logger.info(
+            'Tick ingest running inside the API process because the in-memory Redis substitute cannot fan out between processes. Use a real Redis to move it back to the worker.',
+          );
+          // Pick up watchlist additions, new paper positions and newly
+          // tracked option contracts without a restart. This was exported
+          // and never called, so the subscription set was frozen at boot.
+          setInterval(() => {
+            void refreshSubscriptions().catch((err) =>
+              logger.warn({ err }, 'Tick subscription refresh failed'),
+            );
+          }, 120_000).unref();
+          return;
+        }
+        // false means no capable provider or nothing to watch yet — both can
+        // change (credentials saved, instruments synced), so keep checking.
+      } catch (err) {
+        logger.error({ err, attempt }, 'In-process tick ingest failed to start; will retry');
+      }
+      const delayMs = Math.min(120_000, 30_000 * 2 ** Math.min(attempt, 2));
+      setTimeout(() => void startInProcessIngest(attempt + 1), delayMs).unref();
+    };
+    void startInProcessIngest(0);
+  }
 
   server.listen(env.PORT, () => {
     logger.info(

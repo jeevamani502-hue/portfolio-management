@@ -7,11 +7,9 @@ import * as instrumentsRepo from '../../db/repositories/instruments.js';
 import { getQuote, getCandles } from '../../modules/market/marketData.service.js';
 import { buildSnapshot } from '../../analysis/snapshot.js';
 import { runSignalEngine } from '../../analysis/signals/engine.js';
-import { buildOptionSetup } from '../../analysis/options/setupEngine.js';
-import {
-  getExpiries, getOptionChain, underlyingInstrumentFor,
-} from '../../modules/options/options.service.js';
-import { pushToUser } from '../../websocket/server.js';
+import { meetsGrade, type Grade } from '../../analysis/options/decisionEngine.js';
+import { evaluateUnderlying } from '../../modules/fno/fno.service.js';
+import { notify } from '../../modules/notifications/notifications.service.js';
 
 const log = logger.child({ job: 'alert-evaluator' });
 
@@ -94,6 +92,7 @@ async function evaluateOne(alert: AlertRow): Promise<Evaluation> {
   // handled before the "needs an instrument" guard below.
   if (alert.kind === 'SWING_SCAN') return evaluateSwingScan(alert);
   if (alert.kind === 'FNO_SETUP') return evaluateFnoSetup(alert);
+  if (alert.kind === 'NEWS_FNO') return evaluateNewsFno(alert);
 
   if (alert.instrument_id === null) return { skipped: true, reason: 'no instrument attached' };
 
@@ -281,69 +280,172 @@ async function evaluateSwingScan(alert: AlertRow): Promise<Evaluation> {
 }
 
 /**
- * Fire when the F&O engine produces an actionable option trade.
+ * Fire when the F&O decision engine grades an option trade as ENTER.
  *
  * Capital is read from the alert's own params because the engine refuses to
  * size a position without it — there is no sensible default for how much of
  * someone's money is at stake.
+ *
+ * The decision is journaled under this user, and the alert fires only when
+ * that journal entry is new. Cooldown alone would re-announce the same
+ * contract every few minutes for as long as the checklist kept agreeing;
+ * the journal turns "still valid" into silence and "new setup" into a ping.
  */
 async function evaluateFnoSetup(alert: AlertRow): Promise<Evaluation> {
   const underlying = String(alert.params['underlying'] ?? 'NIFTY').toUpperCase();
   const capital = Number(alert.params['capital'] ?? 0);
   const riskPercent = Number(alert.params['riskPercent'] ?? 1);
   const minConfirmation = Number(alert.params['minConfirmation'] ?? 50);
+  const minGradeRaw = String(alert.params['minGrade'] ?? 'B').toUpperCase();
+  const minGrade: Grade = minGradeRaw === 'A' || minGradeRaw === 'C' ? minGradeRaw : 'B';
 
   if (!(capital > 0)) {
     return { skipped: true, reason: 'no capital set on this alert, so no position can be sized' };
   }
 
   const registry = await registryForUser(alert.user_id);
-  const expiries = await getExpiries(registry, underlying);
-  if (!isAvailable(expiries) || expiries.value.length === 0) {
-    return { skipped: true, reason: `no expiries listed for ${underlying}` };
-  }
-  const expiry = expiries.value[0]!;
-
-  const chain = await getOptionChain(registry, underlying, expiry);
-  if (!isAvailable(chain)) {
-    return { skipped: true, reason: chain.detail ?? 'option chain unavailable' };
-  }
-
-  const instrument = await instrumentsRepo.resolveSymbol(underlyingInstrumentFor(underlying));
-  if (!instrument) return { skipped: true, reason: `underlying for ${underlying} not in the master` };
-
-  const candles = await getCandles(registry, instrument, alert.timeframe as never, { bars: 300 });
-  if (candles.candles.length < 30) {
-    return { skipped: true, reason: `only ${candles.candles.length} bars for ${underlying}` };
-  }
-  const snapshot = buildSnapshot(instrument.tradingsymbol, alert.timeframe as never, candles.candles);
-
-  const setup = buildOptionSetup({
-    underlying, chain: chain.value, signal: runSignalEngine(snapshot),
-    atr: snapshot.volatility.atr14, capital, riskPercent,
+  const evaluation = await evaluateUnderlying(registry, underlying, {
+    capital,
+    riskPercent,
+    biasTimeframe: alert.timeframe === '1h' ? '1h' : '1d',
+    record: { userId: alert.user_id, origin: 'alert' },
   });
 
-  // A refusal is the engine working; it is not something to wake someone for.
-  if (setup.action === 'NO_TRADE') return { fired: false };
-  if (setup.confirmation < minConfirmation) return { fired: false };
+  if (!isAvailable(evaluation.result)) {
+    return { skipped: true, reason: evaluation.result.detail ?? evaluation.result.reason };
+  }
+  const d = evaluation.result.value;
+
+  // A refusal, a wait, or a closed entry window is the engine working; none
+  // of them is something to wake someone for.
+  if (d.stance !== 'ENTER' || !d.plan) return { fired: false };
+  if (!d.entryWindowOpen) return { fired: false };
+  if (!meetsGrade(d.grade, minGrade)) return { fired: false };
+  if (d.score < minConfirmation) return { fired: false };
+  if (!evaluation.isNewSignal) return { fired: false };
+
+  const plan = d.plan;
+  const evaluable = d.factors.filter((f) => f.verdict !== 'na');
+  const passing = evaluable.filter((f) => f.verdict === 'pass').length;
+  const against = evaluable.filter((f) => f.verdict === 'fail').map((f) => f.label.toLowerCase());
 
   return {
     fired: true,
     observed: {
-      action: setup.action, strike: setup.strike, optionType: setup.optionType,
-      entryPremium: setup.entryPremium, lots: setup.sizing?.lots,
-      premiumOutlay: setup.totalPremiumAtRisk, confirmation: setup.confirmation,
-      underlyingStop: setup.underlyingStop, warnings: setup.warnings,
-      source: chain.source, asOf: chain.asOf,
+      action: d.action, grade: d.grade, score: d.score, coverage: d.coverage,
+      strike: d.setup.strike, optionType: d.setup.optionType, expiry: d.expiry,
+      entryPremium: plan.entryPremium, entryZone: plan.entryZone,
+      stopPremium: plan.stopPremium, target1Premium: plan.target1Premium,
+      target2Premium: plan.target2Premium, lots: plan.lots, premiumOutlay: plan.premiumOutlay,
+      underlyingStop: plan.underlyingStop, underlyingTarget1: plan.underlyingTarget1,
+      underlyingTarget2: plan.underlyingTarget2, timeStop: plan.timeStop,
+      against, warnings: d.setup.warnings, signalId: evaluation.signalId,
+      source: evaluation.result.source, asOf: evaluation.result.asOf,
     },
     message:
-      `${underlying} ${setup.strike} ${setup.optionType}: ` +
-      `${setup.action === 'BUY_CALL' ? 'buy call' : 'buy put'} near ` +
-      `₹${setup.entryPremium?.toFixed(2)}, ${setup.sizing?.lots} lot(s), ` +
-      `₹${setup.totalPremiumAtRisk?.toFixed(0)} premium at risk. ` +
-      `Exit if ${underlying} trades through ${setup.underlyingStop?.toFixed(0)}. ` +
-      `${setup.confirmation}/100 conditions agree — not a chance of profit.` +
-      (setup.warnings.length > 0 ? ` Caution: ${setup.warnings[0]}` : ''),
+      `${underlying} ${d.setup.strike} ${d.setup.optionType} (${d.expiry}) — grade ${d.grade}, ` +
+      `${d.action === 'BUY_CALL' ? 'buy call' : 'buy put'}: ${plan.lots} lot(s) between ` +
+      `₹${plan.entryZone.low.toFixed(2)} and ₹${plan.entryZone.high.toFixed(2)}. ` +
+      `Stop ₹${plan.stopPremium.toFixed(2)} or ${underlying} through ${plan.underlyingStop.toFixed(0)}; ` +
+      `targets ₹${plan.target1Premium.toFixed(2)} then ₹${plan.target2Premium.toFixed(2)}. ` +
+      `${passing} of ${evaluable.length} readable conditions agree — a count, not a chance of profit. ` +
+      `₹${plan.premiumOutlay.toFixed(0)} of premium can be lost.` +
+      (against.length > 0 ? ` Against it: ${against.slice(0, 3).join(', ')}.` : ''),
+  };
+}
+
+
+/**
+ * Fresh news on an F&O underlying, paired with what the rule engine makes of it.
+ *
+ * The division of labour matters and is the whole design of this alert:
+ *
+ *   · News decides WHEN to look. Something happened, so the picture may have
+ *     changed and it is worth re-checking.
+ *   · Price and the option chain decide WHICH WAY, if any. News does not.
+ *
+ * That split is not caution for its own sake. Headline sentiment is a poor
+ * predictor of direction — markets routinely fall on good news that was
+ * already priced in, and rally on bad news that came in less bad than feared.
+ * The sentiment label attached to each article here comes from a keyword
+ * classifier that is wrong often enough that trading on it directly would be
+ * closer to a coin flip than to an edge.
+ *
+ * So when news breaks and the rules do not agree on a direction, this alert
+ * says exactly that. Being told "something happened and there is still no
+ * trade" is the more useful message most of the time: it is the moment people
+ * are most tempted to act on a headline alone.
+ */
+async function evaluateNewsFno(alert: AlertRow): Promise<Evaluation> {
+  const underlying = String(alert.params['underlying'] ?? 'NIFTY').toUpperCase();
+  const capital = Number(alert.params['capital'] ?? 0);
+  const riskPercent = Number(alert.params['riskPercent'] ?? 1);
+  const minRelevance = Number(alert.params['minRelevance'] ?? 0.7);
+
+  if (!(capital > 0)) {
+    return { skipped: true, reason: 'no capital set, so no position could be sized' };
+  }
+
+  // Only news since the last firing, so one story is not reported repeatedly.
+  const since = alert.last_fired_at ?? new Date(Date.now() - 6 * 3600_000);
+
+  const articles = await queryRows<{
+    id: string; headline: string; source: string | null;
+    sentiment: string | null; sentiment_score: string | null;
+    published_at: Date; relevance: string; url: string | null;
+  }>(
+    `SELECT DISTINCT ON (n.id)
+            n.id, n.headline, n.source, n.sentiment, n.sentiment_score,
+            n.published_at, e.relevance::text AS relevance, n.url
+       FROM news_articles n
+       JOIN news_entities e ON e.article_id = n.id
+       JOIN instruments i ON i.id = e.instrument_id
+      WHERE n.published_at > $1
+        AND e.relevance >= $2
+        AND (i.tradingsymbol = $3 OR i.underlying = $3)
+      ORDER BY n.id, n.published_at DESC
+      LIMIT 5`,
+    [since, minRelevance, underlying],
+  );
+
+  if (articles.length === 0) return { fired: false };
+
+  const top = articles[0]!;
+  const others = articles.length > 1 ? ` (+${articles.length - 1} more)` : '';
+
+  // Something happened. Now ask price and the chain whether it is tradeable.
+  const setupEval = await evaluateFnoSetup({
+    ...alert,
+    params: { ...alert.params, minConfirmation: Number(alert.params['minConfirmation'] ?? 50) },
+  });
+
+  const newsLine =
+    `${underlying}: "${top.headline.slice(0, 140)}"${others} — ${top.source ?? 'unknown source'}.`;
+
+  const article = {
+    id: top.id, headline: top.headline, url: top.url, publishedAt: top.published_at,
+  };
+
+  if ('fired' in setupEval && setupEval.fired) {
+    return {
+      fired: true,
+      observed: { trigger: 'news', article, articles: articles.length, ...setupEval.observed },
+      message:
+        `${newsLine} The rules independently support a trade: ${setupEval.message} ` +
+        'The direction comes from price and open interest, not from the headline.',
+    };
+  }
+
+  const why =
+    'skipped' in setupEval ? setupEval.reason : 'the rules do not agree on a direction';
+
+  return {
+    fired: true,
+    observed: {
+      trigger: 'news', article, articles: articles.length, setup: 'none', reason: why,
+    },
+    message:
+      `${newsLine} No trade — ${why}. A headline on its own is not a direction.`,
   };
 }
 
@@ -366,19 +468,19 @@ async function recordFiring(
     [alert.id],
   );
 
-  // Browser delivery is a websocket push to every session this user has open.
-  const delivered = pushToUser(alert.user_id, {
-    op: 'alert',
-    alertId: alert.id,
-    name: alert.name,
-    symbol: alert.tradingsymbol ? `${alert.exchange}:${alert.tradingsymbol}` : null,
-    kind: alert.kind,
+  // Persisted first, then pushed to every open session. Pushing alone meant
+  // an alert that fired with no browser open was never seen by anyone.
+  const symbol = alert.tradingsymbol ? `${alert.exchange}:${alert.tradingsymbol}` : null;
+  const isEntry = alert.kind === 'FNO_SETUP' || alert.kind === 'NEWS_FNO';
+  const { sessions } = await notify(alert.user_id, {
+    kind: isEntry && observed['action'] ? 'fno_entry' : 'alert',
+    severity: isEntry ? 'action' : 'info',
+    title: alert.name
+      ?? (symbol ? `${symbol.split(':')[1] ?? symbol}: ${alert.kind.replace(/_/g, ' ').toLowerCase()}` : alert.kind.replace(/_/g, ' ').toLowerCase()),
     message,
-    observed,
-    dataAsOf,
-    source,
-    ts: Date.now(),
+    payload: { alertId: alert.id, kind: alert.kind, symbol, observed, dataAsOf, source },
+    link: isEntry ? '/fno' : symbol ? `/stocks/${encodeURIComponent(symbol)}` : '/alerts',
   });
 
-  log.info({ alertId: alert.id, sessions: delivered, message }, 'Alert fired');
+  log.info({ alertId: alert.id, sessions, message }, 'Alert fired');
 }

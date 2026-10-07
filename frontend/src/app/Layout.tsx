@@ -8,15 +8,17 @@ import { useQuery } from '@tanstack/react-query';
 import {
   LayoutDashboard, TrendingUp, LineChart, Layers, Radar, Briefcase, Eye,
   Newspaper, Bell, FlaskConical,
-  ClipboardList, Bot, Settings as SettingsIcon, LogOut,
+  ClipboardList, Zap, Bot, Settings as SettingsIcon, LogOut,
   Menu, X, Search, Sun, Moon, Wifi, WifiOff,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { api } from '@/services/api';
 import { useAuth } from '@/store/auth';
 import { useTicks, connect, disconnect } from '@/services/ws';
+import { useNotifications } from '@/store/notifications';
 import { Button, Tooltip, Badge } from '@/components/ui';
 import { SymbolSearch } from '@/components/market/SymbolSearch';
+import { NotificationCenter } from '@/components/notifications/NotificationCenter';
 
 const NAV = [
   { to: '/', label: 'Dashboard', icon: LayoutDashboard, end: true },
@@ -29,6 +31,7 @@ const NAV = [
   { to: '/news', label: 'News', icon: Newspaper },
   { to: '/alerts', label: 'Alerts', icon: Bell },
   { to: '/paper', label: 'Paper Trading', icon: ClipboardList },
+  { to: '/live', label: 'Live Trading', icon: Zap },
   { to: '/backtest', label: 'Backtesting', icon: FlaskConical },
   { to: '/analyst', label: 'AI Analyst', icon: Bot },
   { to: '/settings', label: 'Settings', icon: SettingsIcon },
@@ -154,6 +157,7 @@ export function Layout() {
 
   const handleLogout = async () => {
     disconnect();
+    useNotifications.getState().reset();
     await logout();
     navigate('/login');
   };
@@ -250,6 +254,7 @@ export function Layout() {
           </button>
 
           <div className="ml-auto flex items-center gap-3">
+            <NotificationCenter />
             <FeedIndicator />
             <MarketStatusBadge />
             <button

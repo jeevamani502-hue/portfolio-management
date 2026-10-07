@@ -135,15 +135,34 @@ export class ProviderRegistry {
     this.lastError.delete(id);
   }
 
-  private recordFailure(id: ProviderId, message: string): void {
-    const b = this.breakers.get(id) ?? { failures: 0, openedAt: null };
-    b.failures += 1;
-    if (b.failures >= BREAKER_THRESHOLD) {
-      b.openedAt = Date.now();
-      this.log.warn({ provider: id, failures: b.failures }, 'Circuit breaker opened');
+  private recordFailure(id: ProviderId, message: string, countsTowardBreaker = true): void {
+    if (countsTowardBreaker) {
+      const b = this.breakers.get(id) ?? { failures: 0, openedAt: null };
+      b.failures += 1;
+      if (b.failures >= BREAKER_THRESHOLD) {
+        b.openedAt = Date.now();
+        this.log.warn({ provider: id, failures: b.failures }, 'Circuit breaker opened');
+      }
+      this.breakers.set(id, b);
     }
-    this.breakers.set(id, b);
     this.lastError.set(id, message);
+  }
+
+  /**
+   * Whether a failure says something about the provider, or only about the
+   * instrument that was asked for.
+   *
+   * A delisted symbol with no token, an unknown contract, a malformed field:
+   * the provider is fine and would answer for anything else. Counting those
+   * toward the breaker meant one dead symbol in the NIFTY 50 universe opened
+   * Angel One's breaker on every dashboard refresh and took every other quote
+   * down with it for the whole cooldown. Auth failures (401/403), rate limits,
+   * timeouts and 5xx are the provider's problem and still count.
+   */
+  private isProviderLevel(err: unknown): boolean {
+    if (!(err instanceof ProviderError)) return true;
+    if (err.retryable) return true;
+    return err.statusCode === 401;
   }
 
   /**
@@ -179,7 +198,7 @@ export class ProviderRegistry {
         const message =
           err instanceof Error ? err.message.slice(0, 300) : 'unknown provider error';
         attempts.push({ provider: id, error: message });
-        this.recordFailure(id, message);
+        this.recordFailure(id, message, this.isProviderLevel(err));
         this.log.warn({ provider: id, capability, err: message }, 'Provider call failed, failing over');
         await recordDataQualityEvent({
           kind: 'provider_error',

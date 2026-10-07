@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { Plus, Trash2, AlertTriangle, Info } from 'lucide-react';
+import { Plus, Trash2, AlertTriangle, Info, Download } from 'lucide-react';
 import { api } from '@/services/api';
 import { isAvailable } from '@/types/api';
 import {
@@ -10,6 +10,7 @@ import {
 } from '@/components/ui';
 import { DataValue, Metric, MethodNote } from '@/components/market/DataValue';
 import { AllocationBars } from '@/components/portfolio/AllocationBars';
+import { ImportFromBroker } from '@/components/portfolio/ImportFromBroker';
 import { inr, num, pct, signed, signedPct, count, directionClass, arrow } from '@/lib/format';
 import { cn } from '@/lib/utils';
 
@@ -17,6 +18,7 @@ export function Portfolio() {
   const [tab, setTab] = useState('holdings');
   const [adding, setAdding] = useState(false);
   const qc = useQueryClient();
+  const [importing, setImporting] = useState(false);
 
   const portfolios = useQuery({ queryKey: ['portfolio', 'list'], queryFn: () => api.portfolio.list() });
   const portfolioId = portfolios.data?.[0]?.id;
@@ -126,12 +128,17 @@ export function Portfolio() {
           ]}
           className="flex-1"
         />
+        <Button size="sm" variant="outline" onClick={() => setImporting((v) => !v)}>
+          <Download className="h-3.5 w-3.5" aria-hidden />
+          Import from broker
+        </Button>
         <Button size="sm" onClick={() => setAdding((a) => !a)}>
           <Plus className="h-3.5 w-3.5" aria-hidden />
           Add holding
         </Button>
       </div>
 
+      {importing && <ImportFromBroker portfolioId={portfolioId} />}
       {adding && <AddHoldingForm portfolioId={portfolioId} onDone={() => setAdding(false)} />}
 
       {tab === 'holdings' && (
