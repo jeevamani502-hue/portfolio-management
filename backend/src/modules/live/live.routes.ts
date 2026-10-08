@@ -50,14 +50,22 @@ liveRouter.put(
   }),
 );
 
+/** The real account balance, fetched from the broker on every call. */
+liveRouter.get('/funds', asyncHandler(async (req, res) => {
+  try {
+    respond(res, await live.brokerFunds(req.user!.id));
+  } catch (err) {
+    throw badRequest(err instanceof Error ? err.message : 'could not fetch funds');
+  }
+}));
+
+/** Arm for today. The capital base is read from the broker, not the request. */
 liveRouter.post(
   '/arm',
-  validate(z.object({ capital: z.number().positive() })),
   auditLog('live.arm', 'live_trade_config'),
   asyncHandler(async (req, res) => {
-    const { capital } = req.body as { capital: number };
     try {
-      respond(res, await live.arm(req.user!.id, capital));
+      respond(res, await live.arm(req.user!.id));
     } catch (err) {
       throw badRequest(err instanceof Error ? err.message : 'could not arm');
     }

@@ -32,7 +32,8 @@ export type Capability =
   | 'mfNav'
   | 'holdings'
   | 'positions'
-  | 'orders';
+  | 'orders'
+  | 'funds';
 
 export type ProviderId =
   | 'groww'
@@ -283,6 +284,25 @@ export interface NormalizedOrder {
   updatedAt: string;
 }
 
+/**
+ * The broker's own account balance, as it reports it. Nothing here is
+ * computed by the platform: every figure is the broker's number.
+ */
+export interface NormalizedFunds {
+  /** Cash the broker will let you spend on a new trade right now. */
+  availableCash: number;
+  /** Net account value as the broker states it (cash plus collateral, less what is in use). */
+  net: number | null;
+  /** Margin currently blocked by open positions and pending orders. */
+  utilised: number | null;
+  /** Collateral the broker counts (pledged holdings etc.). */
+  collateral: number | null;
+  /** Unrealised and realised mark-to-market for the day, where reported. */
+  m2mUnrealised: number | null;
+  m2mRealised: number | null;
+  fetchedAt: string;
+}
+
 export interface NormalizedTick {
   providerToken: string;
   ltp: number;
@@ -401,6 +421,8 @@ export interface MarketDataProvider {
   cancelOrder?(orderId: string): Promise<void>;
   /** The day's order book, newest state of each order. */
   getOrders?(): Promise<NormalizedOrder[]>;
+  /** The account's available funds, straight from the broker. `funds` capability. */
+  getFunds?(): Promise<NormalizedFunds>;
 }
 
 export const hasCapability = (p: MarketDataProvider, c: Capability): boolean =>

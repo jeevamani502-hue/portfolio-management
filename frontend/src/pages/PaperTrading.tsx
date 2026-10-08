@@ -339,8 +339,21 @@ function TradeTable({
                 : null;
             const entryPos =
               stop !== null && target !== null && target > stop ? (entry - stop) / (target - stop) : null;
+            // Profit and loss are segregated by colour at row level, not only
+            // in the P&L cell: green tint for a gain, red for a loss, neutral
+            // until a position has a price.
+            const rowPnl = isOpen ? gross : net;
             return (
-              <tr key={t.id} className="border-b border-border/50 last:border-0">
+              <tr
+                key={t.id}
+                className={cn(
+                  'border-b border-border/50 last:border-0 border-l-4',
+                  rowPnl === null ? 'border-l-transparent'
+                    : rowPnl > 0 ? 'border-l-up bg-up/5'
+                    : rowPnl < 0 ? 'border-l-down bg-down/5'
+                    : 'border-l-flat',
+                )}
+              >
                 <td className="px-4 py-2">
                   <div className="font-mono">{t.tradingsymbol}</div>
                   <div className="text-2xs text-muted-foreground">

@@ -74,10 +74,10 @@ export function liveBlockers(cfg: LiveGuardConfig, s: LiveGuardState): LiveBlock
     out.push({ code: 'halted', detail: `Halted: ${cfg.haltedReason}`, fix: 'Re-arm tomorrow, or reset after reviewing what happened.' });
   }
   if (!cfg.armedUntil || cfg.armedUntil.getTime() <= s.now.getTime()) {
-    out.push({ code: 'not_armed', detail: 'Not armed. Arming lasts until the end of the session and must be repeated each day.', fix: 'Enter your capital and press Arm.' });
+    out.push({ code: 'not_armed', detail: 'Not armed. Arming lasts until the end of the session and must be repeated each day.', fix: 'Press Arm; the capital base is read from your broker account.' });
   }
   if (cfg.capital === null || !(cfg.capital > 0)) {
-    out.push({ code: 'no_capital', detail: 'No capital stated, so nothing can be sized.', fix: 'Enter the amount when arming.' });
+    out.push({ code: 'no_capital', detail: 'The broker reported no available cash, so nothing can be sized.', fix: 'Add funds at the broker, then arm again.' });
   }
   if (s.marketPhase !== 'OPEN') {
     out.push({ code: 'market_closed', detail: `The market is ${s.marketPhase.toLowerCase().replace(/_/g, ' ')}. Orders are placed only during continuous trading.` });

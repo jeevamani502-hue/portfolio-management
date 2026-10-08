@@ -491,10 +491,12 @@ export async function runExitSweep(userId: string): Promise<ExitResult> {
   return { checked: open.length, closed };
 }
 
+export type PaperExitReason = 'STOP' | 'TARGET' | 'EOD' | 'MANUAL' | 'EXPIRY' | 'NEWS';
+
 async function closeTrade(
   trade: PaperTradeRow,
   fill: Fill,
-  reason: 'STOP' | 'TARGET' | 'EOD' | 'MANUAL' | 'EXPIRY',
+  reason: PaperExitReason,
 ): Promise<void> {
   const entry = Number(trade.entry_price);
   const qty = trade.quantity;
@@ -522,6 +524,15 @@ async function closeTrade(
 
 /** Close an open position at the current price, on the user's instruction. */
 export async function closeManually(userId: string, tradeId: string): Promise<boolean> {
+  return closePaperTrade(userId, tradeId, 'MANUAL');
+}
+
+/** Close an open paper position at the current price for a stated reason. */
+export async function closePaperTrade(
+  userId: string,
+  tradeId: string,
+  reason: PaperExitReason,
+): Promise<boolean> {
   const trade = await queryOne<PaperTradeRow>(
     `SELECT * FROM paper_trades WHERE id = $1 AND user_id = $2 AND status = 'OPEN'`,
     [tradeId, userId],
@@ -535,8 +546,17 @@ export async function closeManually(userId: string, tradeId: string): Promise<bo
   const fill = await simulateFill(registry, instrument, 'SELL');
   if (!fill) return false;
 
-  await closeTrade(trade, fill, 'MANUAL');
+  await closeTrade(trade, fill, reason);
   return true;
+}
+
+/** Move the stop on an open paper position — only ever upward. */
+export async function tightenPaperStop(tradeId: string, newStop: number): Promise<void> {
+  await query(
+    `UPDATE paper_trades SET stop_price = GREATEST(COALESCE(stop_price, 0), $2), updated_at = now()
+      WHERE id = $1 AND status = 'OPEN'`,
+    [tradeId, newStop],
+  );
 }
 
 // ── reporting ───────────────────────────────────────────────────────────────

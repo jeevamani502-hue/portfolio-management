@@ -28,6 +28,8 @@ import { refreshBreadth } from './jobs/breadthRefresh.js';
 import { sweepPaperTrading } from './jobs/paperSweep.js';
 import { trackSignals } from './jobs/signalTracker.js';
 import { runLiveOrders, runLiveAuto } from './jobs/liveTrading.js';
+import { guardAgainstNews } from './jobs/newsGuard.js';
+import { runAgentBriefing } from './jobs/agentBriefing.js';
 import {
   startTickIngest, refreshSubscriptions, stopTickIngest, tickIngestConnected,
 } from './jobs/tickIngest.js';
@@ -111,6 +113,20 @@ const JOBS: Job[] = [
     everyMs: 60_000,
     marketHoursOnly: true,
     run: async () => { await runLiveAuto(); },
+  },
+  {
+    // Re-check open positions when news lands on their underlying. The news
+    // poller runs every ten minutes, so two minutes here is plenty.
+    name: 'news-guard',
+    everyMs: 120_000,
+    marketHoursOnly: true,
+    run: async () => { await guardAgainstNews(); },
+  },
+  {
+    // Morning plan ~09:20 and close report ~15:35; the job itself decides.
+    name: 'agent-briefing',
+    everyMs: 60_000,
+    run: async () => { await runAgentBriefing(); },
   },
   {
     name: 'news-poller',

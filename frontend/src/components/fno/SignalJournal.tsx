@@ -77,8 +77,16 @@ function GradeTable({ rows }: { rows: GradeStatsDto[] }) {
 
 function SignalRow({ s }: { s: FnoSignalDto }) {
   const style = STATUS_STYLE[s.status];
+  // Colour by outcome: green for a call that made money, red for one that
+  // lost, neutral while it is still being tracked.
+  const outcome = s.status === 'ACTIVE' ? null : s.rMultiple;
   return (
-    <div className="rounded-md border border-border p-3">
+    <div
+      className={cn(
+        'rounded-md border border-border border-l-4 p-3',
+        outcome === null ? 'border-l-border' : outcome > 0 ? 'border-l-up bg-up/5' : outcome < 0 ? 'border-l-down bg-down/5' : 'border-l-flat',
+      )}
+    >
       <div className="flex flex-wrap items-start justify-between gap-2">
         <div className="flex flex-wrap items-center gap-2">
           <span className="font-mono text-sm font-medium">

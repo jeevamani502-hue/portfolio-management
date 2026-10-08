@@ -1281,6 +1281,18 @@ export interface LiveBlockerDto {
   fix?: string;
 }
 
+/** The broker's own account balance, every figure as the broker reports it. */
+export interface LiveFundsDto {
+  broker: string;
+  availableCash: number;
+  net: number | null;
+  utilised: number | null;
+  collateral: number | null;
+  m2mUnrealised: number | null;
+  m2mRealised: number | null;
+  fetchedAt: string;
+}
+
 export interface LiveStatusDto {
   config: LiveConfigDto | null;
   armed: boolean;
@@ -1352,6 +1364,42 @@ export interface LivePerformanceDto {
   profitFactor: number | null;
   todayNet: number;
   caveat: string;
+}
+
+// ── agent ───────────────────────────────────────────────────────────────────
+
+export interface AgentPositionDto {
+  kind: 'paper' | 'live';
+  id: string;
+  tradingsymbol: string;
+  exchange: string;
+  underlying: string | null;
+  quantity: number;
+  entryPremium: number;
+  stopPremium: number | null;
+  targetPremium: number | null;
+  lastPremium: number | null;
+  enteredAt: string;
+  grade: string | null;
+  status: string;
+}
+
+export interface AgentSummaryDto {
+  now: string;
+  market: { phase: string; isOpen: boolean };
+  regime: { label: string; composite: number | null; summary: string } | null;
+  paper: PaperStatusDto;
+  live: LiveStatusDto;
+  positions: AgentPositionDto[];
+  callsToday: FnoSignalDto[];
+  activity: NotificationDto[];
+  performance: {
+    signals: SignalPerformanceDto;
+    paper: PaperPerformanceDto;
+    live: LivePerformanceDto;
+  };
+  briefs: { morning: NotificationDto | null; close: NotificationDto | null };
+  next: string;
 }
 
 // ── notifications ───────────────────────────────────────────────────────────

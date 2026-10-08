@@ -21,7 +21,7 @@
 import { query, queryRows, queryOne } from '../../db/pool.js';
 import { logger } from '../../utils/logger.js';
 import { registryForUser, type ProviderRegistry } from '../../providers/registry.js';
-import type { MarketDataProvider, NormalizedOrder } from '../../providers/types.js';
+import type { MarketDataProvider, NormalizedOrder, NormalizedFunds } from '../../providers/types.js';
 import * as instrumentsRepo from '../../db/repositories/instruments.js';
 import { getQuote, marketStatus } from '../market/marketData.service.js';
 import { underlyingInstrumentFor } from '../options/options.service.js';
@@ -128,14 +128,53 @@ export async function upsertLiveConfig(userId: string, p: LiveConfigPatch): Prom
   return (await getLiveConfig(userId))!;
 }
 
+// ── funds ───────────────────────────────────────────────────────────────────
+
+export interface LiveFunds extends NormalizedFunds {
+  broker: string;
+}
+
+/**
+ * The real account balance, straight from the broker. The platform never
+ * types this in or remembers it: every call asks the broker again, and a
+ * failure is reported as a failure rather than a stale number.
+ */
+export async function brokerFunds(userId: string): Promise<LiveFunds> {
+  const registry = await registryForUser(userId);
+  const broker = registry.candidates('funds')[0];
+  if (!broker?.getFunds) throw new Error('No configured broker reports account funds. Connect Angel One in Settings.');
+  const funds = await broker.getFunds();
+  return { ...funds, broker: broker.manifest.id };
+}
+
+/**
+ * Pull the balance again and store it as the capital base, so sizing and
+ * the daily loss cap follow the real account. On a broker failure the last
+ * stored figure stands; the caller decides whether that is acceptable.
+ */
+async function refreshCapital(userId: string): Promise<{ capital: number; fresh: boolean }> {
+  const cfg = await ensureConfig(userId);
+  try {
+    const funds = await brokerFunds(userId);
+    await query(`UPDATE live_trade_config SET capital = $2, updated_at = now() WHERE user_id = $1`, [userId, funds.availableCash]);
+    return { capital: funds.availableCash, fresh: true };
+  } catch (err) {
+    log.warn({ userId, err: (err as Error).message }, 'Could not refresh capital from the broker; using the stored figure');
+    return { capital: cfg.capital === null ? 0 : Number(cfg.capital), fresh: false };
+  }
+}
+
 /**
  * Arm for today's session. Expires at 15:30 IST so live trading is a
- * decision made each morning; the capital is stated here, every time.
+ * decision made each morning. The capital base is the broker's available
+ * cash at this moment, fetched here, never typed in.
  */
-export async function arm(userId: string, capital: number): Promise<LiveConfigRow> {
+export async function arm(userId: string): Promise<LiveConfigRow> {
   const cfg = await ensureConfig(userId);
   if (cfg.mode === 'OFF') throw new Error('Choose Confirm or Auto mode before arming.');
-  if (!(capital > 0)) throw new Error('Capital must be a positive rupee amount.');
+  const funds = await brokerFunds(userId);
+  const capital = funds.availableCash;
+  if (!(capital > 0)) throw new Error(`Your ${funds.broker} account shows no available cash (₹${capital.toLocaleString('en-IN')}). Add funds at the broker, then arm.`);
   const ist = toIst();
   if (ist.minutesOfDay >= 15 * 60 + 30) throw new Error('The session is over for today. Arm again tomorrow morning.');
   if (ist.weekday === 0 || ist.weekday === 6) throw new Error('The market is closed today.');
@@ -149,7 +188,7 @@ export async function arm(userId: string, capital: number): Promise<LiveConfigRo
   log.warn({ userId, capital, until: until.toISOString() }, 'LIVE TRADING ARMED');
   await notify(userId, {
     kind: 'live', severity: 'warning', title: 'Live trading armed',
-    message: `Armed until 15:30 IST with ₹${capital.toLocaleString('en-IN')} as the capital base in ${cfg.mode} mode. Real orders can now be placed within your caps.`,
+    message: `Armed until 15:30 IST in ${cfg.mode} mode. Your ${funds.broker} account shows ₹${capital.toLocaleString('en-IN')} available, and that is the capital base. Real orders can now be placed within your caps.`,
     link: '/live',
   });
   return (await getLiveConfig(userId))!;
@@ -385,7 +424,9 @@ export async function executeLive(
   let broker: MarketDataProvider;
   try { broker = brokerFor(registry); } catch (err) { return none((err as Error).message); }
 
-  const capital = Number(cfg.capital);
+  // Size from the account as it is right now, not as it was this morning.
+  const { capital } = await refreshCapital(userId);
+  if (!(capital > 0)) return none('The broker reports no available cash to trade with.');
   const ev = await evaluateUnderlying(registry, underlying, {
     capital,
     riskPercent: Number(cfg.risk_per_trade_pct),
@@ -710,6 +751,24 @@ export async function manageLiveExits(userId: string, registry?: ProviderRegistr
       log.error({ err, tradeId: t.id }, 'Live exit management failed for this trade');
     }
   }
+}
+
+/** Exit an open live position at market for a stated reason (the news guard). */
+export async function exitLive(userId: string, tradeId: number, code: string, reason: string): Promise<boolean> {
+  const t = await queryOne<LiveTradeRow>(
+    `SELECT ${TRADE_SELECT} FROM live_trades WHERE id = $1 AND user_id = $2 AND status = 'OPEN'`, [tradeId, userId],
+  );
+  if (!t) return false;
+  const broker = brokerFor(await registryForUser(userId));
+  return placeExit(broker, t, t.remaining_qty, 'FULL', code, reason);
+}
+
+/** Move the stop on an open live position — only ever upward. */
+export async function tightenLiveStop(tradeId: number, newStop: number): Promise<void> {
+  await query(
+    `UPDATE live_trades SET stop_premium = GREATEST(stop_premium, $2), updated_at = now() WHERE id = $1 AND status = 'OPEN'`,
+    [tradeId, newStop],
+  );
 }
 
 /** Close one position (or cancel its pending entry) on the user's instruction. */

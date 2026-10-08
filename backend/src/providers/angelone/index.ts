@@ -23,6 +23,7 @@ import type {
   NormalizedHolding,
   NormalizedPosition,
   NormalizedOrder,
+  NormalizedFunds,
   OrderRequest,
   OrderStatus,
   TickStream,
@@ -158,6 +159,7 @@ export class AngelOneProvider extends HttpProvider implements MarketDataProvider
       'positions',
       'streamTicks',
       'orders',
+      'funds',
     ],
     credentialFields: [
       { key: 'apiKey', label: 'API Key', secret: false, required: true },
@@ -727,6 +729,42 @@ export class AngelOneProvider extends HttpProvider implements MarketDataProvider
           updatedAt: o.updatetime ? new Date(o.updatetime).toISOString() : new Date().toISOString(),
         } satisfies NormalizedOrder;
       });
+  }
+
+  /**
+   * Account funds from SmartAPI's RMS limits call. `availablecash` is what
+   * the broker will actually let a new order draw on; `net` is their
+   * headline balance. Both are reported verbatim.
+   */
+  async getFunds(): Promise<NormalizedFunds> {
+    const headers = await this.authHeaders();
+    const res = await this.http<
+      AngelEnvelope<{
+        net?: string | number; availablecash?: string | number; availableintradaypayin?: string | number;
+        availablelimitmargin?: string | number; collateral?: string | number;
+        m2munrealized?: string | number; m2mrealized?: string | number;
+        utiliseddebits?: string | number; utilisedspan?: string | number; utilisedoptionpremium?: string | number;
+        utilisedholdingsales?: string | number; utilisedexposure?: string | number;
+        utilisedturnover?: string | number; utilisedpayout?: string | number;
+      } | null>
+    >('/rest/secure/angelbroking/user/v1/getRMS', { headers, throttleGroup: 'default' });
+    if (!res.status || !res.data) {
+      throw new ProviderError('angelone', res.message ?? 'Funds call failed', { retryable: true });
+    }
+    const d = res.data;
+    const availableCash = num(d.availablecash);
+    if (availableCash === null) {
+      throw new ProviderError('angelone', 'Funds reply had no available cash figure', { retryable: true });
+    }
+    return {
+      availableCash,
+      net: num(d.net),
+      utilised: num(d.utiliseddebits),
+      collateral: num(d.collateral),
+      m2mUnrealised: num(d.m2munrealized),
+      m2mRealised: num(d.m2mrealized),
+      fetchedAt: new Date().toISOString(),
+    };
   }
 
   async getInstruments(): Promise<NormalizedInstrument[]> {

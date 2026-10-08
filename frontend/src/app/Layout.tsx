@@ -22,6 +22,7 @@ import { NotificationCenter } from '@/components/notifications/NotificationCente
 
 const NAV = [
   { to: '/', label: 'Dashboard', icon: LayoutDashboard, end: true },
+  { to: '/agent', label: 'Agent', icon: Bot },
   { to: '/markets', label: 'Markets', icon: TrendingUp },
   { to: '/stocks', label: 'Stocks', icon: LineChart },
   { to: '/fno', label: 'F&O', icon: Layers },
@@ -175,9 +176,9 @@ export function Layout() {
         <div className="flex h-14 items-center justify-between border-b border-border px-4">
           <div className="flex items-center gap-2">
             <div className="flex h-6 w-6 items-center justify-center rounded bg-primary text-2xs font-bold text-primary-foreground">
-              BT
+              AS
             </div>
-            <span className="text-sm font-semibold tracking-tight">Bharat Terminal</span>
+            <span className="text-sm font-semibold tracking-tight">AdviSha</span>
           </div>
           <button
             className="lg:hidden"

@@ -45,7 +45,7 @@ export function Login() {
           <div className="mx-auto flex h-10 w-10 items-center justify-center rounded-lg bg-primary">
             <LineChart className="h-5 w-5 text-primary-foreground" aria-hidden />
           </div>
-          <h1 className="text-xl font-semibold tracking-tight">Bharat Terminal</h1>
+          <h1 className="text-xl font-semibold tracking-tight">AdviSha</h1>
           <p className="text-xs text-muted-foreground">
             Indian market research, analytics and portfolio intelligence
           </p>

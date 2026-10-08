@@ -33,6 +33,7 @@ import { backtestRouter } from './modules/backtest/backtest.routes.js';
 import { fnoRouter } from './modules/fno/fno.routes.js';
 import { notificationsRouter } from './modules/notifications/notifications.routes.js';
 import { liveRouter } from './modules/live/live.routes.js';
+import { agentRouter } from './modules/agent/agent.routes.js';
 
 export function createApp(): Express {
   const app = express();
@@ -146,10 +147,11 @@ export function createApp(): Express {
   api.use('/fno', fnoRouter);
   api.use('/notifications', notificationsRouter);
   api.use('/live', liveRouter);
+  api.use('/agent', agentRouter);
 
   api.get('/', (_req, res) => {
     respond(res, {
-      name: 'Bharat Terminal API',
+      name: 'AdviSha API',
       version: '1',
       documentation: '/api/routes',
       principle: 'Real data, calculated transparently. No value is ever fabricated.',

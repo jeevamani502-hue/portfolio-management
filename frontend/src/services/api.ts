@@ -324,7 +324,8 @@ export const api = {
     config: () => request<LiveConfigDto | null>('/live/config'),
     saveConfig: (body: Partial<LiveConfigInput>) =>
       request<LiveConfigDto>('/live/config', { method: 'PUT', body }),
-    arm: (capital: number) => request<LiveConfigDto>('/live/arm', { method: 'POST', body: { capital } }),
+    funds: () => request<LiveFundsDto>('/live/funds'),
+    arm: () => request<LiveConfigDto>('/live/arm', { method: 'POST' }),
     disarm: () => request<{ disarmed: boolean }>('/live/disarm', { method: 'POST' }),
     kill: () => request<{ cancelled: number; exits: number }>('/live/kill', { method: 'POST' }),
     resetKill: () => request<{ reset: boolean }>('/live/kill/reset', { method: 'POST' }),
@@ -342,6 +343,12 @@ export const api = {
     close: (id: string) => request<{ ok: boolean; reason: string }>(`/live/trades/${id}/close`, { method: 'POST' }),
     sync: () => request<{ synced: boolean }>('/live/sync', { method: 'POST' }),
     performance: () => request<LivePerformanceDto>('/live/performance'),
+  },
+
+  agent: {
+    summary: () => request<AgentSummaryDto>('/agent/summary'),
+    briefMorning: () => request<{ issued: boolean }>('/agent/brief/morning', { method: 'POST' }),
+    briefClose: () => request<{ issued: boolean }>('/agent/brief/close', { method: 'POST' }),
   },
 
   notifications: {
@@ -470,5 +477,6 @@ import type {
   StrategyDto, BacktestRunDto, SettingsDto, ProviderCatalogueDto, ConfiguredProviderDto,
   DataQualityEventDto,
   FnoDecisionDto, FnoSignalDto, SignalPerformanceDto, NotificationDto,
-  LiveStatusDto, LiveConfigDto, LiveConfigInput, LiveTradeDto, LivePerformanceDto,
+  LiveStatusDto, LiveConfigDto, LiveFundsDto, LiveConfigInput, LiveTradeDto, LivePerformanceDto,
+  AgentSummaryDto,
 } from '@/types/api';
