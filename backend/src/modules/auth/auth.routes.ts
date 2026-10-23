@@ -5,14 +5,16 @@
  * token that has already been rotated revokes the whole family — the standard
  * defence against refresh-token replay after theft.
  */
-import { Router } from 'express';
+import { Router, type RequestHandler } from 'express';
 import bcrypt from 'bcryptjs';
+import { createResetLink, consumeResetToken, deliverResetLink, type ResetDelivery } from './reset.service.js';
+import { registrationOpen } from '../admin/admin.service.js';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { env, isProd } from '../../config/env.js';
 import { query, queryOne, withTransaction } from '../../db/pool.js';
 import { sha256, randomToken } from '../../utils/crypto.js';
-import { unauthorized, conflict, badRequest } from '../../utils/errors.js';
+import { unauthorized, conflict, badRequest, forbidden } from '../../utils/errors.js';
 import { logger } from '../../utils/logger.js';
 import {
   asyncHandler, validate, respond, requireAuth, signAccessToken, rateLimit,
@@ -82,6 +84,14 @@ async function issueRefreshToken(
   return token;
 }
 
+/**
+ * The Android shell cannot rely on the cookie: a WebView running from the
+ * APK's own origin does not send a cookie set by the API's origin. When a
+ * request says it is the app, the refresh token is also returned in the
+ * body and the app keeps it on the device.
+ */
+const wantsBodyToken = (req: { get(name: string): string | undefined }): boolean => req.get('x-client') === 'app';
+
 function setRefreshCookie(res: Parameters<typeof respond>[0], token: string): void {
   res.cookie(REFRESH_COOKIE, token, {
     httpOnly: true,
@@ -110,8 +120,18 @@ async function bootstrapUserDefaults(userId: string): Promise<void> {
   });
 }
 
+
+/** Sign-up can be closed from the Admin screen (or ALLOW_REGISTRATION in .env). */
+const registrationGate: RequestHandler = (_req, _res, next) => {
+  registrationOpen().then((open) => {
+    if (open) next();
+    else next(forbidden('New accounts are not being accepted on this server. Ask an administrator.'));
+  }).catch(next);
+};
+
 authRouter.post(
   '/register',
+  registrationGate,
   rateLimit({ bucket: 'auth-register', limit: 5, windowSeconds: 3600 }),
   allowTokensInResponse,
   validate(registerSchema),
@@ -145,6 +165,7 @@ authRouter.post(
       {
         user: { id: user.id, email: user.email, fullName: user.full_name, role: user.role },
         accessToken: signAccessToken(authUser),
+        ...(wantsBodyToken(req) ? { refreshToken: refresh } : {}),
         expiresIn: env.JWT_ACCESS_TTL,
       },
       {},
@@ -186,6 +207,7 @@ authRouter.post(
       user: { id: user.id, email: user.email, fullName: user.full_name, role: user.role },
       accessToken: signAccessToken(authUser),
       expiresIn: env.JWT_ACCESS_TTL,
+      ...(wantsBodyToken(req) ? { refreshToken: refresh } : {}),
     });
   }),
 );
@@ -281,14 +303,17 @@ authRouter.post(
     setRefreshCookie(res, next);
 
     const authUser: AuthUser = { id: row.user_id, email: row.email, role: row.role };
-    respond(res, { accessToken: signAccessToken(authUser), expiresIn: env.JWT_ACCESS_TTL });
+    respond(res, {
+      accessToken: signAccessToken(authUser), expiresIn: env.JWT_ACCESS_TTL,
+      ...(wantsBodyToken(req) ? { refreshToken: next } : {}),
+    });
   }),
 );
 
 authRouter.post(
   '/logout',
   asyncHandler(async (req, res) => {
-    const presented = req.cookies?.[REFRESH_COOKIE] as string | undefined;
+    const presented = (req.cookies?.[REFRESH_COOKIE] as string | undefined) ?? (req.body?.refreshToken as string | undefined);
     if (presented) {
       await query(
         `UPDATE refresh_tokens SET revoked_at = now()
@@ -353,5 +378,45 @@ authRouter.post(
     );
 
     respond(res, { changed: true, message: 'Password updated. Other sessions have been signed out.' });
+  }),
+);
+
+// ── forgot / reset password ─────────────────────────────────────────────────
+// Links are made and delivered by reset.service.ts, shared with the Admin screen.
+
+const forgotSchema = z.object({ email: z.string().email().max(255) });
+const resetSchema = z.object({ token: z.string().min(20).max(200), password: registerSchema.shape.password });
+
+authRouter.post(
+  '/forgot',
+  rateLimit({ bucket: 'auth-forgot', limit: 5, windowSeconds: 900 }),
+  validate(forgotSchema),
+  asyncHandler(async (req, res) => {
+    const { email } = req.body as z.infer<typeof forgotSchema>;
+    const user = await queryOne<{ id: string }>('SELECT id FROM users WHERE email = $1 AND is_active', [email]);
+    let via: ResetDelivery | 'none' = 'none';
+    if (user) via = await deliverResetLink(user.id, email, await createResetLink(user.id));
+    const generic = 'If an account exists for that email, a reset link has been sent.';
+    const message =
+      via === 'email' ? 'A reset link has been emailed to you. It works once and expires in 30 minutes.'
+      : via === 'telegram' ? 'A reset link has been sent to your linked Telegram. It works once and expires in 30 minutes.'
+      : via === 'sms' ? 'A reset link has been sent by SMS to your saved number. It works once and expires in 30 minutes.'
+      : via === 'log' ? 'No email, Telegram or SMS is set up for this account, so the reset link was written to the server log (logs/api.log). Open it from there, or ask an administrator to reset it.'
+      : generic;
+    respond(res, { sent: true, via: isProd ? 'unknown' : via, message: isProd ? generic : message });
+  }),
+);
+
+authRouter.post(
+  '/reset',
+  rateLimit({ bucket: 'auth-reset', limit: 10, windowSeconds: 900 }),
+  validate(resetSchema),
+  asyncHandler(async (req, res) => {
+    const { token, password } = req.body as z.infer<typeof resetSchema>;
+    const userId = await consumeResetToken(token);
+    if (!userId) throw badRequest('This reset link is invalid, already used, or has expired. Request a new one.');
+    await query('UPDATE users SET password_hash = $2 WHERE id = $1', [userId, await bcrypt.hash(password, env.BCRYPT_ROUNDS)]);
+    await query('UPDATE refresh_tokens SET revoked_at = now() WHERE user_id = $1 AND revoked_at IS NULL', [userId]);
+    respond(res, { reset: true, message: 'Password updated. Every session has been signed out.' });
   }),
 );

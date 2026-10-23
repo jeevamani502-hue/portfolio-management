@@ -10,11 +10,12 @@
  * value is something the user can check and disagree with.
  */
 import { useEffect, useRef, useState } from 'react';
+import { RISK_LIMITS } from '@/lib/riskLimits';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '@/services/api';
 import {
   Card, CardHeader, CardTitle, CardContent, Skeleton, Badge, Alert, EmptyState,
-  Button, Input, Label, Tooltip,
+  Button, Input, Label, Tooltip, Select,
 } from '@/components/ui';
 import { DataValue, Metric, SourceLine } from '@/components/market/DataValue';
 import { cn } from '@/lib/utils';
@@ -49,6 +50,8 @@ export function TradeSetupPanel({ underlying, expiry }: { underlying: string; ex
   const [capitalText, setCapitalText] = useState('');
   const [riskText, setRiskText] = useState('1');
   const [submitted, setSubmitted] = useState<{ capital: number; riskPercent: number } | null>(null);
+  const [horizon, setHorizon] = useState<'intraday' | 'swing'>('intraday');
+  const [entryTf, setEntryTf] = useState<'5m' | '15m'>('15m');
   const [prefilledFrom, setPrefilledFrom] = useState<string | null>(null);
   const prefilled = useRef(false);
 
@@ -71,7 +74,7 @@ export function TradeSetupPanel({ underlying, expiry }: { underlying: string; ex
     const pick = fromPaper ?? fromSettings;
     prefilled.current = true;
     if (!pick) return;
-    const risk = Math.min(10, Math.max(0.1, pick.risk));
+    const risk = Math.min(RISK_LIMITS.fno.riskPercent.max, Math.max(RISK_LIMITS.fno.riskPercent.min, pick.risk));
     setCapitalText(String(pick.capital));
     setRiskText(String(risk));
     setPrefilledFrom(pick.label);
@@ -80,14 +83,16 @@ export function TradeSetupPanel({ underlying, expiry }: { underlying: string; ex
 
   const capital = Number(capitalText.replace(/[^0-9.]/g, ''));
   const riskPercent = Number(riskText);
-  const inputsValid = capital > 0 && riskPercent >= 0.1 && riskPercent <= 10;
+  const inputsValid = capital > 0 && riskPercent >= RISK_LIMITS.fno.riskPercent.min && riskPercent <= RISK_LIMITS.fno.riskPercent.max;
 
   const decision = useQuery({
-    queryKey: ['fno', underlying, 'decision', expiry, submitted?.capital, submitted?.riskPercent],
+    queryKey: ['fno', underlying, 'decision', expiry, submitted?.capital, submitted?.riskPercent, horizon, entryTf],
     queryFn: () =>
       api.fno.decision(underlying, {
         capital: submitted!.capital,
         riskPercent: submitted!.riskPercent,
+        horizon,
+        entryTimeframe: entryTf,
         ...(expiry ? { expiry } : {}),
       }),
     enabled: submitted !== null,
@@ -150,6 +155,22 @@ export function TradeSetupPanel({ underlying, expiry }: { underlying: string; ex
                 className="w-28"
               />
             </div>
+            <div className="space-y-1">
+              <Label htmlFor="horizon">Holding</Label>
+              <Select id="horizon" value={horizon} onChange={(e) => setHorizon(e.target.value as 'intraday' | 'swing')} className="w-44">
+                <option value="intraday">Intraday — flat by close</option>
+                <option value="swing">Swing — can hold days</option>
+              </Select>
+            </div>
+            {horizon === 'intraday' && (
+              <div className="space-y-1">
+                <Label htmlFor="entry-tf">Timing chart</Label>
+                <Select id="entry-tf" value={entryTf} onChange={(e) => setEntryTf(e.target.value as '5m' | '15m')} className="w-28">
+                  <option value="15m">15 min</option>
+                  <option value="5m">5 min</option>
+                </Select>
+              </div>
+            )}
             <Button type="submit" disabled={!inputsValid}>
               {submitted ? 'Re-run' : 'Run the checklist'}
             </Button>
@@ -161,8 +182,10 @@ export function TradeSetupPanel({ underlying, expiry }: { underlying: string; ex
             {prefilledFrom && (
               <>Capital and risk are prefilled from {prefilledFrom} — change them and re-run if this trade is sized differently. </>
             )}
-            Direction from the daily bars, timing from the 15-minute bars, positioning from the
-            option chain, volatility from IV and India VIX, sizing from the amount you enter. Every
+            {horizon === 'intraday'
+              ? `Intraday: direction from the hourly bars, timing from the ${entryTf === '5m' ? '5' : '15'}-minute bars, the current week's expiry allowed except on expiry day, flat by the close. `
+              : 'Swing: direction from the daily bars, timing from the 15-minute bars, two or more days to expiry required. '}
+            Positioning from the option chain, volatility from IV and India VIX, sizing from the amount you enter. Every
             factor is shown with the number that decided it. The grade counts agreeing conditions —
             it is not a probability of profit.
           </p>

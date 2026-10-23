@@ -3,6 +3,7 @@ import {
   api, setAccessToken, setUnauthorizedHandler, refreshAccessToken, ApiRequestError,
 } from '@/services/api';
 import type { AuthUserDto } from '@/types/api';
+import { storeRefreshToken } from '@/lib/server';
 
 interface AuthState {
   user: AuthUserDto | null;
@@ -30,6 +31,7 @@ export const useAuth = create<AuthState>((set) => ({
     try {
       const res = await api.auth.login(email, password);
       setAccessToken(res.accessToken);
+      if (res.refreshToken) storeRefreshToken(res.refreshToken);
       set({ user: res.user, loading: false, initialised: true });
     } catch (err) {
       const message =
@@ -44,6 +46,7 @@ export const useAuth = create<AuthState>((set) => ({
     try {
       const res = await api.auth.register(email, password, fullName);
       setAccessToken(res.accessToken);
+      if (res.refreshToken) storeRefreshToken(res.refreshToken);
       set({ user: res.user, loading: false, initialised: true });
     } catch (err) {
       const message =
@@ -60,6 +63,7 @@ export const useAuth = create<AuthState>((set) => ({
       // A failed logout call must still clear local state.
     }
     setAccessToken(null);
+    storeRefreshToken(null);
     set({ user: null, error: null });
   },
 

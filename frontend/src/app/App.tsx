@@ -7,6 +7,10 @@ import { ErrorBoundary } from '@/app/ErrorBoundary';
 import { Spinner } from '@/components/ui';
 
 import { Login } from '@/pages/auth/Login';
+import { ForgotPassword } from '@/pages/auth/ForgotPassword';
+import { ResetPassword } from '@/pages/auth/ResetPassword';
+import { Reports } from '@/pages/Reports';
+import { Admin } from '@/pages/Admin';
 import { Dashboard } from '@/pages/Dashboard';
 import { Markets } from '@/pages/Markets';
 import { StockAnalysis } from '@/pages/StockAnalysis';
@@ -41,6 +45,12 @@ const queryClient = new QueryClient({
     },
   },
 });
+
+function RequireAdmin({ children }: { children: React.ReactNode }) {
+  const user = useAuth((s) => s.user);
+  if (user?.role !== 'admin') return <Navigate to="/" replace />;
+  return <>{children}</>;
+}
 
 function RequireAuth({ children }: { children: React.ReactNode }) {
   const user = useAuth((s) => s.user);
@@ -79,6 +89,8 @@ export function App() {
           <Bootstrap>
             <Routes>
               <Route path="/login" element={<Login />} />
+              <Route path="/forgot-password" element={<ForgotPassword />} />
+              <Route path="/reset-password" element={<ResetPassword />} />
               <Route
                 path="/"
                 element={
@@ -100,6 +112,8 @@ export function App() {
                 <Route path="alerts" element={<Alerts />} />
                 <Route path="paper" element={<PaperTrading />} />
                 <Route path="live" element={<LiveTrading />} />
+                <Route path="reports" element={<Reports />} />
+                <Route path="admin" element={<RequireAdmin><Admin /></RequireAdmin>} />
                 <Route path="agent" element={<Agent />} />
                 <Route path="backtest" element={<Backtesting />} />
                 <Route path="analyst" element={<AiAnalyst />} />

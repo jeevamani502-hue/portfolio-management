@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">AdviSha</string>
+    <string name="title_activity_main">AdviSha</string>
+    <string name="package_name">com.advisha.app</string>
+    <string name="custom_url_scheme">com.advisha.app</string>
+</resources>

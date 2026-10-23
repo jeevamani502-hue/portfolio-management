@@ -94,7 +94,7 @@ function SignalRow({ s }: { s: FnoSignalDto }) {
           </span>
           <Badge variant={s.grade === 'A' ? 'up' : s.grade === 'B' ? 'default' : 'muted'}>Grade {s.grade}</Badge>
           <Badge variant={style.variant}>{style.label}</Badge>
-          <span className="text-2xs text-muted-foreground">{s.expiry} · {s.origin}</span>
+          <span className="text-2xs text-muted-foreground">{s.expiry} · {s.origin}{s.horizon === 'intraday' ? ' · intraday' : ''}</span>
         </div>
         <div className="text-right">
           <div className={cn('font-mono text-sm', rClass(s.rMultiple))}>{fmtR(s.rMultiple)}</div>

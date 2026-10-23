@@ -34,6 +34,8 @@ import { fnoRouter } from './modules/fno/fno.routes.js';
 import { notificationsRouter } from './modules/notifications/notifications.routes.js';
 import { liveRouter } from './modules/live/live.routes.js';
 import { agentRouter } from './modules/agent/agent.routes.js';
+import { reportsRouter } from './modules/reports/reports.routes.js';
+import { adminRouter } from './modules/admin/admin.routes.js';
 
 export function createApp(): Express {
   const app = express();
@@ -148,6 +150,8 @@ export function createApp(): Express {
   api.use('/notifications', notificationsRouter);
   api.use('/live', liveRouter);
   api.use('/agent', agentRouter);
+  api.use('/reports', reportsRouter);
+  api.use('/admin', adminRouter);
 
   api.get('/', (_req, res) => {
     respond(res, {

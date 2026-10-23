@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { RISK_LIMITS } from '@/lib/riskLimits';
 import { Link } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { Plus, Trash2, Bell, BellOff } from 'lucide-react';
@@ -154,7 +155,7 @@ const PARAM_META: Record<
     label: 'Your capital (₹)', type: 'number', default: '', min: 1,
     help: 'Required — the position cannot be sized without it.',
   },
-  riskPercent: { label: 'Risk per trade (%)', type: 'number', default: '1', min: 0.1, max: 10, step: 'any' },
+  riskPercent: { label: 'Risk per trade (%)', type: 'number', default: '1', min: RISK_LIMITS.fno.riskPercent.min, max: RISK_LIMITS.fno.riskPercent.max, step: 'any' },
   minRelevance: {
     label: 'Min news relevance', type: 'number', default: '0.7', min: 0, max: 1, step: '0.05',
     help: 'How tightly the article must tie to the underlying, 0 to 1.',
@@ -268,6 +269,9 @@ function CreateAlertForm({
             <Select id="a-tf" value={timeframe} onChange={(e) => setTimeframe(e.target.value)}>
               {['5m', '15m', '1h', '1d'].map((t) => <option key={t} value={t}>{t}</option>)}
             </Select>
+            <p className="text-2xs leading-relaxed text-muted-foreground">
+              For F&amp;O alerts: 5m, 15m or 1h means an intraday read (hourly direction, timing on these bars, flat by close); 1d means swing.
+            </p>
           </div>
 
           <div className="flex items-end gap-2 sm:col-span-4">

@@ -4,6 +4,7 @@
  */
 import { Router } from 'express';
 import { z } from 'zod';
+import { RISK_LIMITS } from '../../config/riskLimits.js';
 import {
   asyncHandler, respond, requireAuth, validate, symbolParamSchema,
 } from '../../middleware/index.js';
@@ -21,11 +22,13 @@ fnoRouter.use(requireAuth);
 const decisionSchema = z.object({
   expiry: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'expiry must be YYYY-MM-DD').optional(),
   capital: z.coerce.number().positive('capital must be a positive rupee amount'),
-  riskPercent: z.coerce.number().min(0.1).max(10).default(1),
-  biasTimeframe: z.enum(['1h', '1d']).default('1d'),
+  riskPercent: z.coerce.number().min(RISK_LIMITS.fno.riskPercent.min).max(RISK_LIMITS.fno.riskPercent.max).default(1),
+  /** intraday: hourly bias, 15m timing, current week allowed, flat by the close. swing: daily bias. */
+  horizon: z.enum(['intraday', 'swing']).default('intraday'),
+  biasTimeframe: z.enum(['1h', '1d']).optional(),
   entryTimeframe: z.enum(['5m', '15m', '1h']).default('15m'),
   atrStopMultiple: z.coerce.number().min(0.5).max(5).default(1.5),
-  minRewardRisk: z.coerce.number().min(1).max(5).default(1.5),
+  minRewardRisk: z.coerce.number().min(1).max(5).optional(),
   /** Journal an ENTER-grade decision. On by default: looking is how the record builds. */
   record: z.coerce.boolean().default(true),
 });
@@ -43,17 +46,19 @@ fnoRouter.get(
       capital: q.capital,
       riskPercent: q.riskPercent,
       ...(q.expiry ? { expiry: q.expiry } : {}),
-      biasTimeframe: q.biasTimeframe,
+      horizon: q.horizon,
+      biasTimeframe: q.biasTimeframe ?? (q.horizon === 'intraday' ? '1h' : '1d'),
       entryTimeframe: q.entryTimeframe,
       atrStopMultiple: q.atrStopMultiple,
-      minRewardRisk: q.minRewardRisk,
+      ...(q.minRewardRisk !== undefined ? { minRewardRisk: q.minRewardRisk } : {}),
       record: q.record ? { userId: req.user!.id, origin: 'manual' } : null,
     });
 
     respond(res, evaluation.result, {
       expiry: evaluation.expiry,
       underlying: evaluation.underlyingSymbol,
-      biasTimeframe: q.biasTimeframe,
+      horizon: q.horizon,
+      biasTimeframe: q.biasTimeframe ?? (q.horizon === 'intraday' ? '1h' : '1d'),
       entryTimeframe: q.entryTimeframe,
       signalId: evaluation.signalId,
     });

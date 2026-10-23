@@ -481,20 +481,37 @@ export async function getWorkerRegistry(): Promise<ProviderRegistry> {
     );
     return envRegistry;
   }
-  if (rows.length > 1) {
+
+  let userId: string;
+  if (env.BACKGROUND_JOBS_USER) {
+    const designated = await query<{ id: string }>(
+      `SELECT id FROM users WHERE lower(email) = lower($1) AND is_active`,
+      [env.BACKGROUND_JOBS_USER],
+    );
+    const id = designated.rows[0]?.id;
+    if (!id) {
+      logger.error({ email: env.BACKGROUND_JOBS_USER }, 'BACKGROUND_JOBS_USER does not match an active account; background jobs have no data source.');
+      return envRegistry;
+    }
+    if (!rows.some((r) => r.user_id === id)) {
+      logger.error({ email: env.BACKGROUND_JOBS_USER }, 'BACKGROUND_JOBS_USER has no enabled broker credentials; background jobs have no data source.');
+      return envRegistry;
+    }
+    userId = id;
+  } else if (rows.length > 1) {
     logger.warn(
       { users: rows.length },
       'Several users have broker credentials. Background jobs will not pick one on their own — ' +
-        'set credentials in the environment to say which account shared jobs should use.',
+        'set BACKGROUND_JOBS_USER to the email of the account whose credentials shared jobs should use.',
     );
     return envRegistry;
+  } else {
+    userId = rows[0]!.user_id;
   }
-
-  const userId = rows[0]!.user_id;
   const registry = await registryForUser(userId);
   logger.info(
     { userId, providers: registry.all().filter((p) => p.isConfigured()).map((p) => p.manifest.id) },
-    'Background jobs adopted the stored credentials of the only credentialled account',
+    env.BACKGROUND_JOBS_USER ? 'Background jobs are using the designated account\'s stored credentials' : 'Background jobs adopted the stored credentials of the only credentialled account',
   );
   workerRegistry = { at: Date.now(), registry };
   return registry;

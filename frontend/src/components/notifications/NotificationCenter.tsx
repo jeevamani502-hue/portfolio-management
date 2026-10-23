@@ -20,6 +20,7 @@ const KIND_LABEL: Record<NotificationDto['kind'], string> = {
   alert: 'Alert',
   fno_entry: 'F&O entry',
   fno_exit: 'F&O exit',
+  paper: 'Paper trade',
   paper_advice: 'Paper position',
   live: 'Live trading',
   system: 'System',

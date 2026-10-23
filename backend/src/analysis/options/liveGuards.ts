@@ -135,7 +135,7 @@ export interface LiveExitObservation {
   squareOffMin: number;
 }
 
-export type LiveExitCode = 'STOP' | 'INVALIDATED' | 'TARGET1' | 'TARGET2' | 'SQUARE_OFF' | 'EXPIRY';
+export type LiveExitCode = 'STOP' | 'INVALIDATED' | 'TARGET1' | 'TARGET2' | 'SQUARE_OFF' | 'EXPIRY' | 'DIRECTION' | 'SCORE' | 'GIVEBACK';
 
 export type LiveExitAction =
   | { kind: 'HOLD'; note: string }

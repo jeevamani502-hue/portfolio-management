@@ -10,7 +10,7 @@
 import { useEffect, useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
-import { ShieldAlert, Power, RefreshCw } from 'lucide-react';
+import { ShieldAlert, Power, RefreshCw, Zap, Check, X, Minus } from 'lucide-react';
 import { api } from '@/services/api';
 import {
   Card, CardHeader, CardTitle, CardContent, Skeleton, Badge, Alert, EmptyState,
@@ -20,7 +20,8 @@ import { Metric } from '@/components/market/DataValue';
 import { useTicks } from '@/services/ws';
 import { relativeTime, istTime } from '@/lib/format';
 import { cn } from '@/lib/utils';
-import type { LiveConfigDto, LiveStatusDto, LiveTradeDto, LiveMode, LiveFundsDto } from '@/types/api';
+import { RISK_LIMITS } from '@/lib/riskLimits';
+import type { LiveConfigDto, LiveStatusDto, LiveTradeDto, LiveMode, LiveFundsDto, HeroZeroDecisionDto } from '@/types/api';
 
 const inr = (v: number | string | null | undefined, dp = 0) => {
   const n = typeof v === 'string' ? Number(v) : v;
@@ -80,6 +81,8 @@ export function LiveTrading() {
       )}
 
       <SettingsCard status={s} onSaved={invalidate} />
+
+      <HeroZeroCard status={s} onChanged={invalidate} />
 
       {perf.data && (
         <Card>
@@ -369,10 +372,11 @@ function TradeTable({ trades, onClose, closing }: {
                   <div className="flex flex-wrap items-center gap-1.5">
                     <span className="font-mono">{t.tradingsymbol}</span>
                     <Badge variant={badge.variant}>{badge.label}</Badge>
+                    {t.strategy === 'HERO_ZERO' && <Badge variant="warning"><Zap className="mr-0.5 inline h-3 w-3" aria-hidden />Hero Zero</Badge>}
                     {t.t1_done && <Badge variant="up">Half profit taken</Badge>}
                   </div>
                   <div className="text-2xs text-muted-foreground">
-                    {new Date(t.created_at).toLocaleString('en-IN')} · grade {t.grade} · {t.mode} · {t.product}
+                    {new Date(t.created_at).toLocaleString('en-IN')} · {t.strategy === 'HERO_ZERO' ? `${t.score} conditions agreed` : `grade ${t.grade}`} · {t.mode} · {t.product}
                     {t.failure_reason && <> · {t.failure_reason}</>}
                   </div>
                 </td>
@@ -511,13 +515,24 @@ function SettingsCard({ status: s, onSaved }: { status: LiveStatusDto; onSaved: 
   const [underlyings, setUnderlyings] = useState((c?.underlyings ?? ['NIFTY']).join(', '));
   const [scaleOut, setScaleOut] = useState(c?.scale_out ?? true);
   const [allowExpiry, setAllowExpiry] = useState(c?.allow_expiry_day ?? false);
+  const [horizon, setHorizon] = useState<'intraday' | 'swing'>(c?.horizon ?? 'intraday');
+  const [guard, setGuard] = useState(c?.direction_guard ?? true);
+  const [timingGates, setTimingGates] = useState(c?.require_timing_agreement ?? true);
+  const [namedSetup, setNamedSetup] = useState(c?.require_named_setup ?? false);
+  const [cooldown, setCooldown] = useState(String(c?.reentry_cooldown_min ?? 30));
+  const [cutLoser, setCutLoser] = useState(c ? String(Number(c.cut_loser_at_r)) : '0.5');
+  const [stopAtr, setStopAtr] = useState(c ? String(Number(c.stop_atr_multiple)) : '1');
+  const [t1, setT1] = useState(c ? String(Number(c.target1_r)) : '1');
+  const [t2, setT2] = useState(c ? String(Number(c.target2_r)) : '1.5');
 
   const save = useMutation({
     mutationFn: () => api.live.saveConfig({
       mode, riskPerTradePct: Number(risk), maxLotsPerTrade: Number(maxLots), maxOpenPositions: Number(maxOpen),
       maxTradesPerDay: Number(maxDay), maxDailyLossPct: Number(lossCap), entryTimeoutSec: Number(timeout),
       windowStartMin: fromHHMM(windowStart), windowEndMin: fromHHMM(windowEnd), squareOffMin: fromHHMM(squareOff),
-      minGrade, product, scaleOut, allowExpiryDay: allowExpiry,
+      minGrade, product, scaleOut, allowExpiryDay: allowExpiry, horizon, directionGuard: guard,
+      requireTimingAgreement: timingGates, requireNamedSetup: namedSetup, reentryCooldownMin: Number(cooldown),
+      cutLoserAtR: Number(cutLoser), stopAtrMultiple: Number(stopAtr), target1R: Number(t1), target2R: Number(t2),
       underlyings: underlyings.split(',').map((u) => u.trim().toUpperCase()).filter(Boolean),
     }),
     onSuccess: onSaved,
@@ -550,11 +565,11 @@ function SettingsCard({ status: s, onSaved }: { status: LiveStatusDto; onSaved: 
               <option value="AUTO">Automatic — place trades for me within my limits</option>
             </Select>
           </div>
-          <Field label="Most I can lose on one trade (%)" value={risk} onChange={setRisk} help="As a share of the money above." />
+          <Field label="Most I can lose on one trade (%)" value={risk} onChange={setRisk} help={`As a share of the money above. Real money: up to ${RISK_LIMITS.live.riskPerTradePct.max}%.`} />
           <Field label="Most lots in one trade" value={maxLots} onChange={setMaxLots} />
           <Field label="Most trades held at once" value={maxOpen} onChange={setMaxOpen} />
           <Field label="Most trades in a day" value={maxDay} onChange={setMaxDay} />
-          <Field label="Stop for the day after losing (%)" value={lossCap} onChange={setLossCap} help="Counted on finished trades, after charges. Once reached, no more trades today." />
+          <Field label="Stop for the day after losing (%)" value={lossCap} onChange={setLossCap} help={`Counted on finished trades, after charges. Once reached, no more trades today. Up to ${RISK_LIMITS.live.dailyLossPct.max}%.`} />
           <Field label="Cancel a buy if not filled within (seconds)" value={timeout} onChange={setTimeoutSec} help="So it never buys at a worse price than the plan." />
           <Field label="Only start new trades after" type="time" value={windowStart} onChange={setWindowStart} />
           <Field label="No new trades after" type="time" value={windowEnd} onChange={setWindowEnd} />
@@ -572,12 +587,27 @@ function SettingsCard({ status: s, onSaved }: { status: LiveStatusDto; onSaved: 
               <option value="CARRYFORWARD">Can hold overnight</option>
             </Select>
           </div>
+          <div className="space-y-1">
+            <Label htmlFor="live-horizon">Which charts decide</Label>
+            <Select id="live-horizon" value={horizon} onChange={(e) => setHorizon(e.target.value as 'intraday' | 'swing')}>
+              <option value="intraday">Intraday — hourly direction, 15-minute timing, flat by close</option>
+              <option value="swing">Swing — daily direction, can hold for days</option>
+            </Select>
+          </div>
           <div className="col-span-2 space-y-1">
             <Label htmlFor="live-underlyings">Which indices to trade</Label>
             <Input id="live-underlyings" value={underlyings} onChange={(e) => setUnderlyings(e.target.value)} placeholder="NIFTY, BANKNIFTY" />
           </div>
           <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={scaleOut} onChange={(e) => setScaleOut(e.target.checked)} /> Take half the profit at the first aim and let the rest run to the second (needs 2 or more lots)</label>
           <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={allowExpiry} onChange={(e) => setAllowExpiry(e.target.checked)} /> Allow new trades on expiry day (risky)</label>
+          <label className="col-span-2 flex items-center gap-2 text-sm"><input type="checkbox" checked={guard} onChange={(e) => setGuard(e.target.checked)} /> Sell on its own when the chart turns against the trade, and move the stop to breakeven halfway to the aim (direction guard)</label>
+          <Field label="Cooldown after an exit (minutes)" value={cooldown} onChange={setCooldown} help="No re-entry on that index for this long. 0 = off." />
+          <Field label="Cut a loser at (× risk)" value={cutLoser} onChange={setCutLoser} help="Sell once down this much and one reading has turned. 0 = off." />
+          <Field label="Stop distance (× hourly range)" value={stopAtr} onChange={setStopAtr} help="1.0 keeps lots sized to real risk." />
+          <Field label="First aim (× risk)" value={t1} onChange={setT1} />
+          <Field label="Second aim (× risk)" value={t2} onChange={setT2} />
+          <label className="col-span-2 flex items-center gap-2 text-sm"><input type="checkbox" checked={timingGates} onChange={(e) => setTimingGates(e.target.checked)} /> Require the 15-minute chart to agree before entering (score, supertrend, VWAP)</label>
+          <label className="col-span-2 flex items-center gap-2 text-sm"><input type="checkbox" checked={namedSetup} onChange={(e) => setNamedSetup(e.target.checked)} /> Require a named chart pattern on the direction chart (blocks most trades)</label>
         </div>
 
         <div className="flex flex-wrap items-center gap-3">
@@ -602,6 +632,193 @@ function SettingsCard({ status: s, onSaved }: { status: LiveStatusDto; onSaved: 
           the idea, at the sell-everything time, or when the aim is reached. The daily loss limit stops it for the day; the
           emergency stop sells everything at once.
         </p>
+      </CardContent>
+    </Card>
+  );
+}
+
+// ── hero zero ───────────────────────────────────────────────────────────────
+
+const STANCE_BADGE: Record<HeroZeroDecisionDto['stance'], { label: string; variant: 'up' | 'warning' | 'muted' }> = {
+  ENTER: { label: 'Conditions met', variant: 'up' },
+  WAIT: { label: 'Watching', variant: 'warning' },
+  AVOID: { label: 'Not today', variant: 'muted' },
+};
+
+function FactorIcon({ status }: { status: 'AGREE' | 'AGAINST' | 'UNREADABLE' }) {
+  if (status === 'AGREE') return <Check className="h-3.5 w-3.5 shrink-0 text-bull" aria-label="agrees" />;
+  if (status === 'AGAINST') return <X className="h-3.5 w-3.5 shrink-0 text-bear" aria-label="against" />;
+  return <Minus className="h-3.5 w-3.5 shrink-0 text-muted-foreground" aria-label="unreadable" />;
+}
+
+function HeroZeroDecision({ d, canPlace, mode, onPlace, placing }: {
+  d: HeroZeroDecisionDto; canPlace: boolean; mode: LiveMode; onPlace: () => void; placing: boolean;
+}) {
+  const st = STANCE_BADGE[d.stance];
+  const c = d.candidate;
+  return (
+    <div className={cn('rounded border border-border border-l-4 p-3', d.stance === 'ENTER' ? 'border-l-up bg-up/5' : d.stance === 'WAIT' ? 'border-l-delayed' : 'border-l-border')}>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="font-mono text-sm font-medium">{d.underlying}</span>
+          <Badge variant={st.variant}>{st.label}</Badge>
+          {d.side && <Badge variant="outline">{d.side === 'BUY_CALL' ? 'Calls' : 'Puts'}</Badge>}
+          <span className="text-2xs text-muted-foreground">expiry {d.expiry}{d.daysToExpiry === 0 ? ' (today)' : ` · in ${d.daysToExpiry} day(s)`} · {d.agreeing} of {d.readable} conditions agree</span>
+        </div>
+        {d.stance === 'ENTER' && c && (
+          mode === 'AUTO' && canPlace ? (
+            <span className="text-2xs text-muted-foreground">Automatic mode places this itself on its next check.</span>
+          ) : (
+            <Button onClick={onPlace} disabled={!canPlace || placing} className="h-8 text-xs">
+              <Zap className="h-3.5 w-3.5" aria-hidden /> {placing ? 'Placing…' : `Place Hero Zero: ${c.lots} lot(s) ${c.strike} ${c.optionType}`}
+            </Button>
+          )
+        )}
+      </div>
+      <p className="mt-1 text-sm leading-relaxed">{d.summary}</p>
+
+      {c && (
+        <div className="mt-2 grid grid-cols-2 gap-3 sm:grid-cols-4 lg:grid-cols-8">
+          <Metric label="Option" value={`${c.strike} ${c.optionType}`} />
+          <Metric label="Price now" value={inr(c.premium, 2)} />
+          <Metric label="Will pay up to" value={inr(c.limit, 2)} />
+          <Metric label="Lots" value={`${c.lots} × ${c.lotSize}`} />
+          <Metric label="Money at risk" value={inr(c.outlay)} />
+          <Metric label="Give up at" value={inr(c.stopPremium, 2)} />
+          <Metric label="First aim" value={inr(c.target1Premium, 2)} />
+          <Metric label="Second aim" value={inr(c.target2Premium, 2)} />
+        </div>
+      )}
+      {!c && d.side && d.candidateNote && <p className="mt-1 text-2xs text-muted-foreground">{d.candidateNote}</p>}
+
+      <details className="mt-2">
+        <summary className="cursor-pointer text-2xs uppercase tracking-wide text-muted-foreground">What it checked</summary>
+        <ul className="mt-1.5 space-y-1">
+          {d.gates.map((g) => (
+            <li key={g.code} className="flex items-start gap-1.5 text-xs">
+              <FactorIcon status={g.ok ? 'AGREE' : 'AGAINST'} /><span className="text-muted-foreground">{g.detail}</span>
+            </li>
+          ))}
+          {d.factors.map((f) => (
+            <li key={f.code} className="flex items-start gap-1.5 text-xs">
+              <FactorIcon status={f.status} />
+              <span><span className="font-medium">{f.label}.</span> <span className="text-muted-foreground">{f.detail}</span></span>
+            </li>
+          ))}
+        </ul>
+      </details>
+    </div>
+  );
+}
+
+/**
+ * Hero Zero — the expiry-day cheap-option trade, as its own section with its
+ * own budget and rules. Kept apart from the main settings on purpose: this
+ * money is expected to go to zero most of the time, and the card says so.
+ */
+function HeroZeroCard({ status: s, onChanged }: { status: LiveStatusDto; onChanged: () => void }) {
+  const c = s.config;
+  const [enabled, setEnabled] = useState(c?.hero_zero_enabled ?? false);
+  const [budget, setBudget] = useState(c ? String(Number(c.hero_zero_budget)) : '2000');
+  const [minPrem, setMinPrem] = useState(c ? String(Number(c.hero_zero_min_premium)) : '3');
+  const [maxPrem, setMaxPrem] = useState(c ? String(Number(c.hero_zero_max_premium)) : '25');
+  const [maxLots, setMaxLots] = useState(String(c?.hero_zero_max_lots ?? 2));
+  const [maxDay, setMaxDay] = useState(String(c?.hero_zero_max_trades_per_day ?? 1));
+  const [wStart, setWStart] = useState(toHHMM(c?.hero_zero_window_start_min ?? 750));
+  const [wEnd, setWEnd] = useState(toHHMM(c?.hero_zero_window_end_min ?? 900));
+  const [sqOff, setSqOff] = useState(toHHMM(c?.hero_zero_square_off_min ?? 920));
+  const [stopPct, setStopPct] = useState(c ? String(Number(c.hero_zero_stop_pct)) : '50');
+  const [mult, setMult] = useState(c ? String(Number(c.hero_zero_target_multiple)) : '3');
+  const [minAgree, setMinAgree] = useState(String(c?.hero_zero_min_agree ?? 5));
+
+  const scan = useQuery({ queryKey: ['live', 'hero-zero'], queryFn: api.live.heroZero, refetchInterval: 60_000, enabled: c !== null, retry: 1 });
+  const refresh = () => { onChanged(); void scan.refetch(); };
+  const save = useMutation({
+    mutationFn: () => api.live.saveConfig({
+      heroZeroEnabled: enabled, heroZeroBudget: Number(budget), heroZeroMinPremium: Number(minPrem), heroZeroMaxPremium: Number(maxPrem),
+      heroZeroMaxLots: Number(maxLots), heroZeroMaxTradesPerDay: Number(maxDay),
+      heroZeroWindowStartMin: fromHHMM(wStart), heroZeroWindowEndMin: fromHHMM(wEnd), heroZeroSquareOffMin: fromHHMM(sqOff),
+      heroZeroStopPct: Number(stopPct), heroZeroTargetMultiple: Number(mult), heroZeroMinAgree: Number(minAgree),
+    }),
+    onSuccess: refresh,
+  });
+  const exec = useMutation({ mutationFn: (underlying: string) => api.live.executeHeroZero(underlying), onSuccess: refresh });
+
+  const live = c?.hero_zero_enabled ?? false;
+  const canPlace = live && s.armed && s.blockers.length === 0 && (scan.data?.attemptsToday ?? 0) < (c?.hero_zero_max_trades_per_day ?? 1);
+  const err = save.error ?? exec.error;
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="flex flex-wrap items-center gap-2">
+          <Zap className="h-4 w-4" aria-hidden /> Hero Zero — expiry-day trade
+          <Badge variant={live ? (s.armed ? 'warning' : 'outline') : 'muted'}>{live ? (s.armed ? 'On' : 'On, but not switched on for today') : 'Off'}</Badge>
+          {scan.data && <Badge variant="outline">{scan.data.attemptsToday} of {c?.hero_zero_max_trades_per_day ?? 1} attempt(s) used today</Badge>}
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <Alert variant="warning" title="What this trade is">
+          On the afternoon of expiry day, when the market is already moving one way, it buys a very cheap out-of-the-money option for a
+          fixed budget. If the move keeps going the price can multiply; if not, the option goes to zero. Most attempts go to zero. The
+          budget below is the amount you are prepared to lose in full on one attempt. The conditions describe the day; they do not predict it.
+        </Alert>
+
+        <label className="flex items-center gap-2 text-sm font-medium">
+          <input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} /> Allow Hero Zero trades
+        </label>
+
+        <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4">
+          <Field label="Budget per attempt (₹)" value={budget} onChange={setBudget} help="All of it is at risk. Lots are sized from it." />
+          <Field label="Attempts per day" value={maxDay} onChange={setMaxDay} />
+          <Field label="Most lots per attempt" value={maxLots} onChange={setMaxLots} />
+          <Field label="Cheapest option to buy (₹)" value={minPrem} onChange={setMinPrem} help="Below this the option is usually dead." />
+          <Field label="Dearest option to buy (₹)" value={maxPrem} onChange={setMaxPrem} help="Above this it is no longer a cheap lottery." />
+          <Field label="Look for it after" type="time" value={wStart} onChange={setWStart} />
+          <Field label="Stop looking after" type="time" value={wEnd} onChange={setWEnd} />
+          <Field label="Sell by" type="time" value={sqOff} onChange={setSqOff} help="Whatever is left is sold at this time." />
+          <Field label="Give up if the price falls (%)" value={stopPct} onChange={setStopPct} help="0 means hold it to the end, even to zero." />
+          <Field label="Aim: multiply the price by" value={mult} onChange={setMult} help="Half is sold halfway there, the rest here." />
+          <Field label="Conditions that must agree (of 7)" value={minAgree} onChange={setMinAgree} help="Lower means more attempts, more zeros." />
+        </div>
+
+        <div className="flex flex-wrap items-center gap-3">
+          <Button variant="outline" onClick={() => save.mutate()} disabled={save.isPending}>Save Hero Zero settings</Button>
+          {save.isSuccess && <span className="text-sm text-muted-foreground">Saved.</span>}
+          {err && <span className="text-sm text-destructive">{err instanceof Error ? err.message : 'Could not save.'}</span>}
+          {exec.data?.placed && <span className="text-sm text-bull">Order placed (trade #{exec.data.tradeId}). It appears in the table below.</span>}
+        </div>
+
+        <div className="space-y-2">
+          <div className="flex items-center justify-between">
+            <p className="text-2xs font-medium uppercase tracking-wide text-muted-foreground">Today's read, per index</p>
+            <Button variant="ghost" onClick={() => void scan.refetch()} disabled={scan.isFetching} className="h-7 text-xs">
+              <RefreshCw className={cn('h-3 w-3', scan.isFetching && 'animate-spin')} aria-hidden /> Check again
+            </Button>
+          </div>
+          {!c ? (
+            <p className="text-sm text-muted-foreground">Save the main settings above first.</p>
+          ) : scan.isLoading ? (
+            <Skeleton className="h-24" />
+          ) : scan.error ? (
+            <Alert variant="error">{scan.error instanceof Error ? scan.error.message : 'Could not read the market.'}</Alert>
+          ) : (
+            (scan.data?.results ?? []).map((r) =>
+              r.decision ? (
+                <HeroZeroDecision
+                  key={r.underlying} d={r.decision} canPlace={canPlace} mode={c.mode} placing={exec.isPending}
+                  onPlace={() => {
+                    const cand = r.decision!.candidate!;
+                    if (window.confirm(`Place a REAL Hero Zero order: buy ${cand.lots} lot(s) ${r.underlying} ${cand.strike} ${cand.optionType} for about ₹${cand.outlay.toFixed(0)}? Expect to lose all of it if the move stalls.`)) exec.mutate(r.underlying);
+                  }}
+                />
+              ) : (
+                <div key={r.underlying} className="rounded border border-border p-3 text-sm text-muted-foreground"><span className="font-mono">{r.underlying}</span>: {r.error}</div>
+              ),
+            )
+          )}
+          {c && live && !s.armed && <p className="text-2xs text-muted-foreground">Hero Zero only places orders while real money trading is switched on for the day (above).</p>}
+        </div>
       </CardContent>
     </Card>
   );

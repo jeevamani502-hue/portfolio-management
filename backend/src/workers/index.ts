@@ -9,6 +9,11 @@
  *   npm run dev:worker    (development)
  *   npm run start:worker  (production)
  */
+import { setDefaultResultOrder } from 'node:dns';
+// Prefer IPv4. On this network the IPv6 path to api.telegram.org (and others)
+// stalls intermittently while IPv4 answers in half a second; Node's default
+// tries IPv6 first and waits out the whole timeout before giving up.
+setDefaultResultOrder('ipv4first');
 import { env } from '../config/env.js';
 import { logger } from '../utils/logger.js';
 import { pingDb, closeDb, query } from '../db/pool.js';
@@ -30,6 +35,7 @@ import { trackSignals } from './jobs/signalTracker.js';
 import { runLiveOrders, runLiveAuto } from './jobs/liveTrading.js';
 import { guardAgainstNews } from './jobs/newsGuard.js';
 import { runAgentBriefing } from './jobs/agentBriefing.js';
+import { pollTelegramLinks } from '../modules/notifications/channels.service.js';
 import {
   startTickIngest, refreshSubscriptions, stopTickIngest, tickIngestConnected,
 } from './jobs/tickIngest.js';
@@ -59,7 +65,7 @@ const JOBS: Job[] = [
     // minutes is enough for daily-timeframe setups and keeps provider calls
     // proportionate to the number of open positions.
     name: 'paper-sweep',
-    everyMs: 180_000,
+    everyMs: 60_000,
     marketHoursOnly: true,
     runOnStart: true,
     run: async () => { await sweepPaperTrading(); },
@@ -133,6 +139,12 @@ const JOBS: Job[] = [
     everyMs: 600_000,
     runOnStart: true,
     run: async () => { await pollNews(); },
+  },
+  {
+    // Links Telegram chats from one-time codes. Returns at once when nobody is linking.
+    name: 'telegram-link-poller',
+    everyMs: 10_000,
+    run: async () => { await pollTelegramLinks(); },
   },
   {
     name: 'portfolio-valuation',

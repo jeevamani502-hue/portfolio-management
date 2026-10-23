@@ -12,11 +12,11 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '@/services/api';
 import {
   Card, CardHeader, CardTitle, CardContent, Skeleton, Badge, Alert, EmptyState,
-  Button, Input, Label, Tabs,
-} from '@/components/ui';
+  Button, Input, Label, Tabs, Select } from '@/components/ui';
 import { Metric } from '@/components/market/DataValue';
 import { useTicks } from '@/services/ws';
 import { cn } from '@/lib/utils';
+import { RISK_LIMITS } from '@/lib/riskLimits';
 import type { PaperConfigDto, PaperTradeDto, PositionAdviceDto } from '@/types/api';
 import { EngineStatus } from '@/components/paper/EngineStatus';
 
@@ -217,10 +217,17 @@ function useLiveMark(advice: PositionAdviceDto[]) {
   const ticks = useTicks((s) => s.ticks);
   const feedState = useTicks((s) => s.feedState);
   const adviceById = new Map(advice.map((a) => [a.tradeId, a]));
-  return (t: PaperTradeDto): { ltp: number | null; source: 'live' | 'advisor' | null; net: number | null } => {
+  return (t: PaperTradeDto): { ltp: number | null; source: 'live' | 'advisor' | 'mark' | null; net: number | null } => {
     const tick = feedState === 'connected' ? ticks[`${t.exchange}:${t.tradingsymbol}`] : undefined;
     const a = adviceById.get(t.id);
-    if (tick) return { ltp: tick.ltp, source: 'live', net: a?.unrealizedNet ?? null };
+    const entry = Number(t.entry_price);
+    // "If closed now": the streamed price less what the close will actually
+    // pay (spread crossing, slippage, both legs' charges), from the server's
+    // own fill model, so this number and the closed row's net agree.
+    const netAt = (ltp: number): number | null =>
+      t.mark ? (ltp - t.mark.exitDiscount - entry) * t.quantity - t.mark.costEstimate : (a?.unrealizedNet ?? null);
+    if (tick) return { ltp: tick.ltp, source: 'live', net: netAt(tick.ltp) };
+    if (t.mark) return { ltp: t.mark.ltp, source: 'mark', net: t.mark.netIfClosedNow };
     if (a?.currentPrice !== null && a?.currentPrice !== undefined) return { ltp: a.currentPrice, source: 'advisor', net: a.unrealizedNet };
     return { ltp: null, source: null, net: null };
   };
@@ -248,6 +255,8 @@ function SubscribeTicks({ trades }: { trades: PaperTradeDto[] }) {
 function OpenPnlStrip({ trades, advice }: { trades: PaperTradeDto[]; advice: PositionAdviceDto[] }) {
   const mark = useLiveMark(advice);
   let gross = 0;
+  let net = 0;
+  let netCount = 0;
   let outlay = 0;
   let marked = 0;
   let live = 0;
@@ -259,32 +268,36 @@ function OpenPnlStrip({ trades, advice }: { trades: PaperTradeDto[]; advice: Pos
     marked += 1;
     if (m.source === 'live') live += 1;
     gross += (m.ltp - entry) * t.quantity;
+    if (m.net !== null) { net += m.net; netCount += 1; }
   }
-  const pct = outlay > 0 ? (gross / outlay) * 100 : null;
+  const headline = netCount === marked && marked > 0 ? net : gross;
+  const pct = outlay > 0 ? (headline / outlay) * 100 : null;
   return (
     <Card>
       <CardContent className="flex flex-wrap items-center justify-between gap-4 pt-4">
         <div>
-          <div className="text-2xs uppercase tracking-wide text-muted-foreground">Open P&amp;L, live</div>
-          <div className={cn('tabular text-2xl font-semibold', pnlClass(gross))}>
-            {marked === 0 ? '—' : `${gross >= 0 ? '+' : ''}${inr(gross, 0)}`}
+          <div className="text-2xs uppercase tracking-wide text-muted-foreground">If closed now, after charges</div>
+          <div className={cn('tabular text-2xl font-semibold', pnlClass(headline))}>
+            {marked === 0 ? '—' : `${headline >= 0 ? '+' : ''}${inr(headline, 0)}`}
             {pct !== null && marked > 0 && (
               <span className="ml-2 text-sm font-normal">({pct >= 0 ? '+' : ''}{pct.toFixed(1)}%)</span>
             )}
           </div>
         </div>
         <div className="flex gap-5">
+          <Metric label="Before charges" value={marked === 0 ? '—' : `${gross >= 0 ? '+' : ''}${inr(gross, 0)}`} className={pnlClass(gross)} />
           <Metric label="Positions" value={trades.length} />
           <Metric label="Premium out" value={inr(outlay, 0)} />
           <Metric
             label="Marked"
             value={`${marked}/${trades.length}`}
-            sub={live === marked && marked > 0 ? 'all streaming' : live > 0 ? `${live} streaming` : marked > 0 ? 'advisor price (≤ 1 min old)' : 'no price yet'}
+            sub={live === marked && marked > 0 ? 'all streaming' : live > 0 ? `${live} streaming` : marked > 0 ? 'server price (≤ 5 s old)' : 'no price yet'}
           />
         </div>
         <p className="w-full text-2xs leading-relaxed text-muted-foreground">
-          Gross, before exit costs. The advisor panel above shows each position net of the full
-          round-trip cost stack. A position with no price is shown as unmarked, never as zero.
+          The headline is what closing every position this instant would leave after selling at the bid, paying slippage
+          and both legs' charges — the same arithmetic the close itself uses, so it matches the Closed tab. The
+          before-charges figure is the raw last price and is always higher.
         </p>
       </CardContent>
     </Card>
@@ -305,7 +318,7 @@ function TradeTable({
             <th className="px-4 py-2 text-right font-medium">Qty</th>
             <th className="px-4 py-2 text-right font-medium">Entry</th>
             {isOpen && <th className="px-4 py-2 text-right font-medium">LTP</th>}
-            {isOpen && <th className="px-4 py-2 text-right font-medium">P&amp;L</th>}
+            {isOpen && <th className="px-4 py-2 text-right font-medium">If closed now</th>}
             <th className="px-4 py-2 text-right font-medium">Stop</th>
             <th className="px-4 py-2 text-right font-medium">Target</th>
             {isOpen ? (
@@ -317,7 +330,8 @@ function TradeTable({
               <>
                 <th className="px-4 py-2 text-right font-medium">Exit</th>
                 <th className="px-4 py-2 text-left font-medium">Why</th>
-                <th className="px-4 py-2 text-right font-medium">Costs</th>
+                <th className="px-4 py-2 text-right font-medium">Before charges</th>
+                <th className="px-4 py-2 text-right font-medium">Charges</th>
                 <th className="px-4 py-2 text-right font-medium">Net P&amp;L</th>
               </>
             )}
@@ -342,7 +356,7 @@ function TradeTable({
             // Profit and loss are segregated by colour at row level, not only
             // in the P&L cell: green tint for a gain, red for a loss, neutral
             // until a position has a price.
-            const rowPnl = isOpen ? gross : net;
+            const rowPnl = isOpen ? (m.net ?? gross) : net;
             return (
               <tr
                 key={t.id}
@@ -375,11 +389,16 @@ function TradeTable({
                   </td>
                 )}
                 {isOpen && (
-                  <td className={cn('px-4 py-2 text-right font-mono', pnlClass(gross))}>
-                    {gross === null ? '—' : (
+                  <td className={cn('px-4 py-2 text-right font-mono', pnlClass(m.net ?? gross))}>
+                    {gross === null ? '—' : m.net !== null ? (
+                      <>
+                        {m.net >= 0 ? '+' : ''}{inr(m.net, 0)}
+                        <div className="text-2xs text-muted-foreground">{inr(gross, 0)} before charges{pct !== null && ` · ${pct >= 0 ? '+' : ''}${pct.toFixed(1)}%`}</div>
+                      </>
+                    ) : (
                       <>
                         {gross >= 0 ? '+' : ''}{inr(gross, 0)}
-                        <div className="text-2xs">{pct !== null && `${pct >= 0 ? '+' : ''}${pct.toFixed(1)}%`}{m.net !== null && ` · net ${inr(m.net, 0)}`}</div>
+                        <div className="text-2xs text-muted-foreground">before charges{pct !== null && ` · ${pct >= 0 ? '+' : ''}${pct.toFixed(1)}%`}</div>
                       </>
                     )}
                   </td>
@@ -417,8 +436,11 @@ function TradeTable({
                     <td className="px-4 py-2 text-right font-mono">{inr(t.exit_price, 2)}</td>
                     <td className="px-4 py-2">
                       <Badge variant={t.exit_reason === 'TARGET' ? 'up' : 'outline'}>
-                        {t.exit_reason ?? '—'}
+                        {t.exit_reason === 'EOD' ? 'Day end' : t.exit_reason === 'THESIS' ? 'Direction changed' : t.exit_reason === 'GIVEBACK' ? 'Profit protected' : (t.exit_reason ?? '—')}
                       </Badge>
+                    </td>
+                    <td className="px-4 py-2 text-right font-mono text-muted-foreground">
+                      {inr(t.gross_pnl, 2)}
                     </td>
                     <td className="px-4 py-2 text-right font-mono text-muted-foreground">
                       {inr(t.costs, 2)}
@@ -447,6 +469,19 @@ function ConfigCard({ config, onSaved }: { config: PaperConfigDto | null; onSave
   );
   const [minConf, setMinConf] = useState(String(config?.min_confirmation ?? 60));
   const [underlyings, setUnderlyings] = useState((config?.underlyings ?? ['NIFTY']).join(', '));
+  const [intradayOnly, setIntradayOnly] = useState(config?.intraday_only ?? true);
+  const [entryCutoff, setEntryCutoff] = useState(toHHMM(config?.entry_cutoff_min ?? 870));
+  const [squareOff, setSquareOff] = useState(toHHMM(config?.square_off_min ?? 915));
+  const [guard, setGuard] = useState(config?.direction_guard ?? true);
+  const [entryStart, setEntryStart] = useState(toHHMM(config?.entry_start_min ?? 585));
+  const [minGrade, setMinGrade] = useState<'A' | 'B' | 'C'>(config?.min_grade ?? 'B');
+  const [timingGates, setTimingGates] = useState(config?.require_timing_agreement ?? true);
+  const [namedSetup, setNamedSetup] = useState(config?.require_named_setup ?? false);
+  const [cooldown, setCooldown] = useState(String(config?.reentry_cooldown_min ?? 30));
+  const [cutLoser, setCutLoser] = useState(config ? String(Number(config.cut_loser_at_r)) : '0.5');
+  const [stopAtr, setStopAtr] = useState(config ? String(Number(config.stop_atr_multiple)) : '1');
+  const [t1, setT1] = useState(config ? String(Number(config.target1_r)) : '1');
+  const [t2, setT2] = useState(config ? String(Number(config.target2_r)) : '1.5');
 
   const save = useMutation({
     mutationFn: (isEnabled: boolean) =>
@@ -459,6 +494,9 @@ function ConfigCard({ config, onSaved }: { config: PaperConfigDto | null; onSave
         maxDailyLossPct: Number(lossCap),
         minConfirmation: Number(minConf),
         underlyings: underlyings.split(',').map((u) => u.trim().toUpperCase()).filter(Boolean),
+        intradayOnly, entryCutoffMin: fromHHMM(entryCutoff), squareOffMin: fromHHMM(squareOff), directionGuard: guard,
+        entryStartMin: fromHHMM(entryStart), minGrade, requireTimingAgreement: timingGates, requireNamedSetup: namedSetup,
+        reentryCooldownMin: Number(cooldown), cutLoserAtR: Number(cutLoser), stopAtrMultiple: Number(stopAtr), target1R: Number(t1), target2R: Number(t2),
       }),
     onSuccess: onSaved,
   });
@@ -477,10 +515,10 @@ function ConfigCard({ config, onSaved }: { config: PaperConfigDto | null; onSave
       <CardContent className="space-y-4">
         <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4">
           <Field label="Capital (₹)" value={capital} onChange={setCapital} placeholder="500000" />
-          <Field label="Risk per trade (%)" value={risk} onChange={setRisk} />
+          <Field label="Risk per trade (%)" value={risk} onChange={setRisk} help={`Paper money: anything up to ${RISK_LIMITS.paper.riskPerTradePct.max}%.`} />
           <Field label="Max open positions" value={maxOpen} onChange={setMaxOpen} />
           <Field label="Max trades per day" value={maxDay} onChange={setMaxDay} />
-          <Field label="Daily loss cap (%)" value={lossCap} onChange={setLossCap} />
+          <Field label="Daily loss cap (%)" value={lossCap} onChange={setLossCap} help={`Up to ${RISK_LIMITS.paper.dailyLossPct.max}%.`} />
           <Field label="Min confirmation" value={minConf} onChange={setMinConf} />
           <div className="col-span-2 space-y-1">
             <Label htmlFor="underlyings">Underlyings</Label>
@@ -491,6 +529,56 @@ function ConfigCard({ config, onSaved }: { config: PaperConfigDto | null; onSave
               placeholder="NIFTY, BANKNIFTY"
             />
           </div>
+        </div>
+
+        <div className="space-y-3 rounded border border-border bg-muted/30 p-3">
+          <label className="flex items-center gap-2 text-sm font-medium">
+            <input type="checkbox" checked={intradayOnly} onChange={(e) => setIntradayOnly(e.target.checked)} />
+            Intraday only — close everything the same day, never carry forward
+          </label>
+          <label className="flex items-center gap-2 text-sm font-medium">
+            <input type="checkbox" checked={guard} onChange={(e) => setGuard(e.target.checked)} />
+            Close on its own when the chart turns against the trade (direction guard)
+          </label>
+          {guard && (
+            <p className="text-2xs leading-relaxed text-muted-foreground">
+              Every minute: out if the direction chart crosses against the position, if two or more 15-minute readings
+              (supertrend, VWAP, EMAs, score) turn, if the score has dropped 20 points while losing, or if a winner has
+              given most of its gain back. Halfway to target the stop moves to breakeven.
+            </p>
+          )}
+          {intradayOnly && (
+            <div className="grid grid-cols-2 gap-4 sm:grid-cols-3">
+              <Field label="No new trades after" type="time" value={entryCutoff} onChange={setEntryCutoff} help="A trade opened this late has little time to work." />
+              <Field label="Close everything by" type="time" value={squareOff} onChange={setSquareOff} help="Whatever is still open is sold at the market price then." />
+            </div>
+          )}
+          <p className="text-2xs leading-relaxed text-muted-foreground">
+            {intradayOnly
+              ? 'Intraday analysis: the direction comes from the hourly chart, the entry from the 15-minute chart, and the current week\'s expiry is allowed as long as it is not expiry day itself. A position found open from an earlier day is closed on the first check.'
+              : 'Swing analysis: the direction comes from the daily chart and two or more days to expiry are required. Positions are held until the stop, target or thesis says otherwise.'}
+          </p>
+        </div>
+
+        <div className="space-y-3 rounded border border-border p-3">
+          <div className="text-2xs font-medium uppercase tracking-wide text-muted-foreground">Trading rules</div>
+          <p className="text-2xs text-muted-foreground">Every rule the engine follows, with the defaults that are on now. Change them here; the engine reads them on its next check.</p>
+          <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4">
+            <Field label="Only start new trades after" type="time" value={entryStart} onChange={setEntryStart} help="Default 09:45, after the first 15-minute bar closes." />
+            <div className="space-y-1">
+              <Label htmlFor="pmin-grade">Only take trades graded</Label>
+              <Select id="pmin-grade" value={minGrade} onChange={(e) => setMinGrade(e.target.value as 'A' | 'B' | 'C')}>
+                <option value="A">A — only the best (score 75+)</option><option value="B">A or B (score 60+)</option><option value="C">A, B or C (score 45+)</option>
+              </Select>
+            </div>
+            <Field label="Cooldown after an exit (minutes)" value={cooldown} onChange={setCooldown} help="No re-entry on that index for this long. 0 = off." />
+            <Field label="Cut a loser at (× risk)" value={cutLoser} onChange={setCutLoser} help="Sell once down this much and one reading has turned. 0 = off." />
+            <Field label="Stop distance (× hourly range)" value={stopAtr} onChange={setStopAtr} help="Was 1.5; 1.0 keeps lots sized to real risk." />
+            <Field label="First aim (× risk)" value={t1} onChange={setT1} help="Intraday default 1.0." />
+            <Field label="Second aim (× risk)" value={t2} onChange={setT2} help="Intraday default 1.5." />
+          </div>
+          <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={timingGates} onChange={(e) => setTimingGates(e.target.checked)} /> Require the 15-minute chart to agree before entering (score, supertrend, VWAP). Off = those only lower the score.</label>
+          <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={namedSetup} onChange={(e) => setNamedSetup(e.target.checked)} /> Require a named chart pattern on the direction chart (rarely true on hourly index bars; blocks most trades)</label>
         </div>
 
         <div className="flex flex-wrap items-center gap-3">
@@ -520,20 +608,25 @@ function ConfigCard({ config, onSaved }: { config: PaperConfigDto | null; onSave
   );
 }
 
+const toHHMM = (m: number) => `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
+const fromHHMM = (s: string) => { const [h, m] = s.split(':').map(Number); return (h ?? 0) * 60 + (m ?? 0); };
+
 function Field({
-  label, value, onChange, placeholder,
-}: { label: string; value: string; onChange: (v: string) => void; placeholder?: string }) {
+  label, value, onChange, placeholder, help, type = 'text',
+}: { label: string; value: string; onChange: (v: string) => void; placeholder?: string; help?: string; type?: string }) {
   const id = label.replace(/\W+/g, '-').toLowerCase();
   return (
     <div className="space-y-1">
       <Label htmlFor={id}>{label}</Label>
       <Input
         id={id}
-        inputMode="decimal"
+        type={type}
+        inputMode={type === 'text' ? 'decimal' : undefined}
         value={value}
         onChange={(e) => onChange(e.target.value)}
         {...(placeholder ? { placeholder } : {})}
       />
+      {help && <p className="text-2xs leading-relaxed text-muted-foreground">{help}</p>}
     </div>
   );
 }

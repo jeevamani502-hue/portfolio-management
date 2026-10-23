@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { z } from 'zod';
+import { RISK_LIMITS } from '../../config/riskLimits.js';
 import {
   asyncHandler, respond, requireAuth, validate, symbolParamSchema,
 } from '../../middleware/index.js';
@@ -97,7 +98,7 @@ optionsRouter.get(
 const setupSchema = z.object({
   expiry: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'expiry must be YYYY-MM-DD').optional(),
   capital: z.coerce.number().positive('capital must be a positive rupee amount'),
-  riskPercent: z.coerce.number().min(0.1).max(10).default(1),
+  riskPercent: z.coerce.number().min(RISK_LIMITS.fno.riskPercent.min).max(RISK_LIMITS.fno.riskPercent.max).default(1),
   timeframe: z.enum(['15m', '1h', '1d']).default('1d'),
   atrStopMultiple: z.coerce.number().min(0.5).max(5).default(1.5),
   minRewardRisk: z.coerce.number().min(1).max(5).default(1.5),

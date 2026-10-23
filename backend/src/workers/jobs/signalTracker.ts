@@ -24,6 +24,8 @@ import {
 import { notify } from '../../modules/notifications/notifications.service.js';
 import { resolveSignalOutcome, type SignalStatus } from '../../analysis/options/signalOutcome.js';
 import { calendarDaysToExpiry } from '../../analysis/options/decisionEngine.js';
+import { decideDirectionExit } from '../../analysis/options/directionGuard.js';
+import { readDirection } from '../../modules/market/directionRead.js';
 
 const log = logger.child({ job: 'signal-tracker' });
 
@@ -136,9 +138,10 @@ export async function trackSignals(): Promise<void> {
       }
       const spot = spots.get(spotKey) ?? null;
 
-      const outcome = resolveSignalOutcome(
+      const planOutcome = resolveSignalOutcome(
         {
           action: s.action,
+          horizon: s.horizon,
           expiry: s.expiry,
           generatedAt: s.generatedAt,
           entryPremium: s.entryPremium,
@@ -151,6 +154,27 @@ export async function trackSignals(): Promise<void> {
         },
         { premium, spot, now },
       );
+
+      // The plan's levels are intact; the chart may still have turned. A
+      // journaled call is run by a person, so the resolution is the exit alert.
+      let outcome = planOutcome;
+      if (planOutcome.status === 'ACTIVE') {
+        const horizon = s.horizon ?? 'swing';
+        const read = await readDirection(registry, s.underlying, horizon);
+        const g = decideDirectionExit({
+          action: s.action, horizon, entryPremium: s.entryPremium, premium,
+          stopPremium: s.stopPremium, target1Premium: s.target1Premium,
+          maxFavourablePremium: planOutcome.maxFavourablePremium,
+        }, read);
+        if (g.kind === 'EXIT') {
+          const riskPerUnit = s.entryPremium - s.stopPremium;
+          outcome = {
+            ...planOutcome, status: 'INVALIDATED',
+            rMultiple: riskPerUnit > 0 ? Number(((premium - s.entryPremium) / riskPerUnit).toFixed(3)) : null,
+            note: `Exit now at ₹${premium.toFixed(2)} — ${g.reason}`,
+          };
+        }
+      }
 
       const daysToExpiry = calendarDaysToExpiry(s.expiry, now);
       const warnStop = outcome.status === 'ACTIVE' && !s.stopWarned && outcome.stopProximity >= STOP_PROXIMITY_WARN;

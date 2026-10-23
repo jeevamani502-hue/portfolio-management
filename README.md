@@ -297,7 +297,8 @@ frontend/src/
   pages/        13 routes
   components/   DataValue (the honesty component), market, analysis, portfolio
   charts/       lightweight-charts candles, Recharts equity curve
-database/migrations/   4 SQL files, 25 tables
+database/migrations/   18 SQL files, 41 tables
+docs/DATABASE.md       every table and its purpose: users, trades, profit, history, with queries
 docs/ARCHITECTURE.md   full design: providers, data flow, ER diagram, roadmap
 ```
 

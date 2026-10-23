@@ -5,6 +5,11 @@
  * database and Redis are reachable, and installs graceful-shutdown handlers so
  * in-flight requests finish before the process exits.
  */
+import { setDefaultResultOrder } from 'node:dns';
+// Prefer IPv4. On this network the IPv6 path to api.telegram.org (and others)
+// stalls intermittently while IPv4 answers in half a second; Node's default
+// tries IPv6 first and waits out the whole timeout before giving up.
+setDefaultResultOrder('ipv4first');
 import { createServer } from 'node:http';
 import { env, isProd, aiAvailable } from './config/env.js';
 import { logger } from './utils/logger.js';

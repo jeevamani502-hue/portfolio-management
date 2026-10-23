@@ -33,6 +33,8 @@ import {
   type LiveMode, type LiveBlocker, type LiveGuardConfig,
 } from '../../analysis/options/liveGuards.js';
 import { calculateRoundTripCosts } from '../../analysis/backtest/costs.js';
+import { decideDirectionExit, DEFAULT_GUARD } from '../../analysis/options/directionGuard.js';
+import { readDirection } from '../market/directionRead.js';
 import { notify } from '../notifications/notifications.service.js';
 import { toIst, fromIst } from '../../utils/time.js';
 
@@ -59,6 +61,27 @@ export interface LiveConfigRow {
   product: 'INTRADAY' | 'CARRYFORWARD';
   scale_out: boolean;
   entry_timeout_sec: number;
+  hero_zero_enabled: boolean;
+  hero_zero_budget: string;
+  hero_zero_min_premium: string;
+  hero_zero_max_premium: string;
+  hero_zero_max_lots: number;
+  hero_zero_max_trades_per_day: number;
+  hero_zero_window_start_min: number;
+  hero_zero_window_end_min: number;
+  hero_zero_square_off_min: number;
+  hero_zero_stop_pct: string;
+  hero_zero_target_multiple: string;
+  hero_zero_min_agree: number;
+  horizon: 'intraday' | 'swing';
+  direction_guard: boolean;
+  require_timing_agreement: boolean;
+  require_named_setup: boolean;
+  reentry_cooldown_min: number;
+  cut_loser_at_r: string;
+  stop_atr_multiple: string;
+  target1_r: string;
+  target2_r: string;
   kill_switch: boolean;
   halted_reason: string | null;
   halted_at: Date | null;
@@ -82,6 +105,27 @@ export interface LiveConfigPatch {
   product?: 'INTRADAY' | 'CARRYFORWARD';
   scaleOut?: boolean;
   entryTimeoutSec?: number;
+  heroZeroEnabled?: boolean;
+  heroZeroBudget?: number;
+  heroZeroMinPremium?: number;
+  heroZeroMaxPremium?: number;
+  heroZeroMaxLots?: number;
+  heroZeroMaxTradesPerDay?: number;
+  heroZeroWindowStartMin?: number;
+  heroZeroWindowEndMin?: number;
+  heroZeroSquareOffMin?: number;
+  heroZeroStopPct?: number;
+  heroZeroTargetMultiple?: number;
+  heroZeroMinAgree?: number;
+  horizon?: 'intraday' | 'swing';
+  directionGuard?: boolean;
+  requireTimingAgreement?: boolean;
+  requireNamedSetup?: boolean;
+  reentryCooldownMin?: number;
+  cutLoserAtR?: number;
+  stopAtrMultiple?: number;
+  target1R?: number;
+  target2R?: number;
 }
 
 export async function getLiveConfig(userId: string): Promise<LiveConfigRow | null> {
@@ -97,6 +141,12 @@ export async function upsertLiveConfig(userId: string, p: LiveConfigPatch): Prom
   await ensureConfig(userId);
   if (p.windowStartMin !== undefined && p.windowEndMin !== undefined && p.windowStartMin >= p.windowEndMin) {
     throw new Error('The entry window must start before it ends.');
+  }
+  if (p.heroZeroWindowStartMin !== undefined && p.heroZeroWindowEndMin !== undefined && p.heroZeroWindowStartMin >= p.heroZeroWindowEndMin) {
+    throw new Error('The Hero Zero window must start before it ends.');
+  }
+  if (p.heroZeroMinPremium !== undefined && p.heroZeroMaxPremium !== undefined && p.heroZeroMinPremium >= p.heroZeroMaxPremium) {
+    throw new Error('The Hero Zero premium band must have the cheapest below the dearest.');
   }
   await query(
     `UPDATE live_trade_config SET
@@ -115,6 +165,27 @@ export async function upsertLiveConfig(userId: string, p: LiveConfigPatch): Prom
        product = COALESCE($14, product),
        scale_out = COALESCE($15, scale_out),
        entry_timeout_sec = COALESCE($16, entry_timeout_sec),
+       hero_zero_enabled = COALESCE($17, hero_zero_enabled),
+       hero_zero_budget = COALESCE($18, hero_zero_budget),
+       hero_zero_min_premium = COALESCE($19, hero_zero_min_premium),
+       hero_zero_max_premium = COALESCE($20, hero_zero_max_premium),
+       hero_zero_max_lots = COALESCE($21, hero_zero_max_lots),
+       hero_zero_max_trades_per_day = COALESCE($22, hero_zero_max_trades_per_day),
+       hero_zero_window_start_min = COALESCE($23, hero_zero_window_start_min),
+       hero_zero_window_end_min = COALESCE($24, hero_zero_window_end_min),
+       hero_zero_square_off_min = COALESCE($25, hero_zero_square_off_min),
+       hero_zero_stop_pct = COALESCE($26, hero_zero_stop_pct),
+       hero_zero_target_multiple = COALESCE($27, hero_zero_target_multiple),
+       hero_zero_min_agree = COALESCE($28, hero_zero_min_agree),
+       horizon = COALESCE($29, horizon),
+       direction_guard = COALESCE($30, direction_guard),
+       require_timing_agreement = COALESCE($31, require_timing_agreement),
+       require_named_setup = COALESCE($32, require_named_setup),
+       reentry_cooldown_min = COALESCE($33, reentry_cooldown_min),
+       cut_loser_at_r = COALESCE($34, cut_loser_at_r),
+       stop_atr_multiple = COALESCE($35, stop_atr_multiple),
+       target1_r = COALESCE($36, target1_r),
+       target2_r = COALESCE($37, target2_r),
        updated_at = now()
      WHERE user_id = $1`,
     [
@@ -123,6 +194,12 @@ export async function upsertLiveConfig(userId: string, p: LiveConfigPatch): Prom
       p.underlyings?.map((u) => u.toUpperCase()) ?? null, p.minGrade ?? null, p.allowExpiryDay ?? null,
       p.windowStartMin ?? null, p.windowEndMin ?? null, p.squareOffMin ?? null, p.product ?? null,
       p.scaleOut ?? null, p.entryTimeoutSec ?? null,
+      p.heroZeroEnabled ?? null, p.heroZeroBudget ?? null, p.heroZeroMinPremium ?? null, p.heroZeroMaxPremium ?? null,
+      p.heroZeroMaxLots ?? null, p.heroZeroMaxTradesPerDay ?? null, p.heroZeroWindowStartMin ?? null,
+      p.heroZeroWindowEndMin ?? null, p.heroZeroSquareOffMin ?? null, p.heroZeroStopPct ?? null,
+      p.heroZeroTargetMultiple ?? null, p.heroZeroMinAgree ?? null, p.horizon ?? null, p.directionGuard ?? null,
+      p.requireTimingAgreement ?? null, p.requireNamedSetup ?? null, p.reentryCooldownMin ?? null, p.cutLoserAtR ?? null,
+      p.stopAtrMultiple ?? null, p.target1R ?? null, p.target2R ?? null,
     ],
   );
   return (await getLiveConfig(userId))!;
@@ -152,7 +229,7 @@ export async function brokerFunds(userId: string): Promise<LiveFunds> {
  * the daily loss cap follow the real account. On a broker failure the last
  * stored figure stands; the caller decides whether that is acceptable.
  */
-async function refreshCapital(userId: string): Promise<{ capital: number; fresh: boolean }> {
+export async function refreshCapital(userId: string): Promise<{ capital: number; fresh: boolean }> {
   const cfg = await ensureConfig(userId);
   try {
     const funds = await brokerFunds(userId);
@@ -247,7 +324,7 @@ const guardConfig = (c: LiveConfigRow): LiveGuardConfig => ({
   minGrade: c.min_grade,
 });
 
-async function blockersFor(userId: string, cfg: LiveConfigRow, daysToExpiry: number | null): Promise<LiveBlocker[]> {
+export async function blockersFor(userId: string, cfg: LiveConfigRow, daysToExpiry: number | null): Promise<LiveBlocker[]> {
   const [state, market] = await Promise.all([liveState(userId), marketStatus()]);
   return liveBlockers(guardConfig(cfg), {
     ...state, marketPhase: market.phase, now: new Date(), daysToExpiry,
@@ -301,7 +378,7 @@ export async function getLiveStatus(userId: string): Promise<LiveStatus> {
 
 // ── broker plumbing ─────────────────────────────────────────────────────────
 
-function brokerFor(registry: ProviderRegistry): MarketDataProvider {
+export function brokerFor(registry: ProviderRegistry): MarketDataProvider {
   const broker = registry.candidates('orders')[0];
   if (!broker) throw new Error('No configured broker can place orders.');
   return broker;
@@ -372,8 +449,11 @@ export interface LiveTradeRow {
   status: 'PENDING' | 'OPEN' | 'EXITING' | 'CLOSED' | 'FAILED';
   failure_reason: string | null;
   broker_log: unknown[];
+  strategy: LiveStrategy;
   created_at: Date;
 }
+
+export type LiveStrategy = 'CHECKLIST' | 'HERO_ZERO';
 
 const TRADE_SELECT = `*, to_char(expiry, 'YYYY-MM-DD') AS expiry`;
 
@@ -420,6 +500,19 @@ export async function executeLive(
   const early = await blockersFor(userId, cfg, null);
   if (early.length > 0) return none(early[0]!.detail);
 
+  // No re-entry on an underlying for a while after the engine closed a trade on
+  // it, and never a contract that already lost money today.
+  const recentExit = await queryOne<{ exit_code: string; minutes: string }>(
+    `SELECT exit_code, EXTRACT(EPOCH FROM (now() - closed_at))::int / 60 AS minutes
+       FROM live_trades
+      WHERE user_id = $1 AND underlying = $2 AND status = 'CLOSED'
+        AND exit_code IN ('DIRECTION','SCORE','GIVEBACK','STOP','INVALIDATED','NEWS')
+        AND closed_at > now() - ($3 || ' minutes')::interval
+      ORDER BY closed_at DESC LIMIT 1`,
+    [userId, underlying, String(cfg.reentry_cooldown_min)],
+  );
+  if (recentExit && cfg.reentry_cooldown_min > 0) return none(`Cooling off: ${underlying} was closed ${recentExit.minutes} min ago (${recentExit.exit_code.toLowerCase()}); no re-entry for ${cfg.reentry_cooldown_min} minutes.`);
+
   const registry = await registryForUser(userId);
   let broker: MarketDataProvider;
   try { broker = brokerFor(registry); } catch (err) { return none((err as Error).message); }
@@ -430,6 +523,13 @@ export async function executeLive(
   const ev = await evaluateUnderlying(registry, underlying, {
     capital,
     riskPercent: Number(cfg.risk_per_trade_pct),
+    horizon: cfg.horizon,
+    timingGates: cfg.require_timing_agreement,
+    namedSetupGate: cfg.require_named_setup,
+    entryStartMin: cfg.window_start_min,
+    atrStopMultiple: Number(cfg.stop_atr_multiple),
+    minRewardRisk: Number(cfg.target1_r),
+    target2R: Number(cfg.target2_r),
     record: { userId, origin: 'live' },
   });
   if (!isAvailable(ev.result) || !ev.expiry) {
@@ -437,6 +537,7 @@ export async function executeLive(
   }
   const d = ev.result.value;
   if (d.stance !== 'ENTER' || !d.plan) return none(`Grade ${d.grade}: ${d.holdBecause[0] ?? 'the checklist does not support an entry.'}`);
+  if (d.action === 'NO_TRADE') return none('The checklist has no direction.');
   if (!meetsGrade(d.grade, cfg.min_grade)) return none(`Grade ${d.grade} is below your minimum of ${cfg.min_grade}.`);
   if (!d.entryWindowOpen) return none(d.sessionNote);
 
@@ -448,34 +549,91 @@ export async function executeLive(
   const lots = Math.min(plan.lots, cfg.max_lots_per_trade);
   if (lots < 1) return none('The plan sizes to zero lots at this capital.');
   const quantity = lots * lotSize;
+  const limit = roundTick(plan.entryZone.high);
 
-  const contract = await instrumentsRepo.findOptionContract(
-    d.underlying, d.expiry, d.setup.strike!, d.setup.optionType!, [broker.manifest.id],
-  );
+  return openLiveTrade({
+    userId, mode, broker, signalId: ev.signalId, strategy: 'CHECKLIST',
+    underlying: d.underlying, expiry: d.expiry, strike: d.setup.strike!, optionType: d.setup.optionType!, action: d.action,
+    product: cfg.product, lotSize, lots, quantity, limit,
+    grade: d.grade, score: d.score,
+    stopPremium: plan.stopPremium, target1Premium: plan.target1Premium, target2Premium: plan.target2Premium,
+    underlyingStop: plan.underlyingStop, underlyingTarget1: plan.underlyingTarget1, underlyingTarget2: plan.underlyingTarget2,
+    plan: { ...plan, factors: d.factors, summary: d.summary }, scaleOut: cfg.scale_out, entryTimeoutSec: cfg.entry_timeout_sec,
+    notifyTitle: null,
+    notifyMessage: `Limit ₹${limit.toFixed(2)} × ${quantity} (${mode} mode, grade ${d.grade}). Stop ₹${plan.stopPremium.toFixed(2)} / ${d.underlying} ${plan.underlyingStop.toFixed(0)}; targets ₹${plan.target1Premium.toFixed(2)} and ₹${plan.target2Premium.toFixed(2)}. Cancelled automatically if unfilled in ${cfg.entry_timeout_sec}s.`,
+  });
+}
+
+export interface OpenLiveTradeArgs {
+  userId: string;
+  mode: 'CONFIRM' | 'AUTO';
+  broker: MarketDataProvider;
+  signalId: number | null;
+  strategy: LiveStrategy;
+  underlying: string;
+  expiry: string;
+  strike: number;
+  optionType: 'CE' | 'PE';
+  action: 'BUY_CALL' | 'BUY_PUT';
+  product: 'INTRADAY' | 'CARRYFORWARD';
+  lotSize: number;
+  lots: number;
+  quantity: number;
+  limit: number;
+  grade: string;
+  score: number;
+  stopPremium: number;
+  target1Premium: number;
+  target2Premium: number;
+  underlyingStop: number;
+  underlyingTarget1: number;
+  underlyingTarget2: number;
+  plan: Record<string, unknown>;
+  scaleOut: boolean;
+  entryTimeoutSec: number;
+  /** Notification title; null uses the standard "Live order: buy …". */
+  notifyTitle: string | null;
+  notifyMessage: string;
+}
+
+/**
+ * Record the trade and send the entry order. Shared by every strategy so the
+ * broker log, the duplicate check and the failure path are identical.
+ */
+export async function openLiveTrade(a: OpenLiveTradeArgs): Promise<ExecuteResult> {
+  const none = (reason: string): ExecuteResult => ({ placed: false, reason, tradeId: null, orderId: null });
+  const { userId, mode, broker, lots, quantity, limit } = a;
+
+  const contract = await instrumentsRepo.findOptionContract(a.underlying, a.expiry, a.strike, a.optionType, [broker.manifest.id]);
   const token = contract ? instrumentsRepo.providerToken(contract, broker.manifest.id) : undefined;
-  if (!contract || !token) return none(`${broker.manifest.displayName} has no symbol token for ${d.underlying} ${d.setup.strike} ${d.setup.optionType}.`);
+  if (!contract || !token) return none(`${broker.manifest.displayName} has no symbol token for ${a.underlying} ${a.strike} ${a.optionType}.`);
 
   const dupe = await queryOne<{ id: string }>(
     `SELECT id FROM live_trades WHERE user_id = $1 AND instrument_id = $2 AND status IN ('PENDING','OPEN','EXITING') LIMIT 1`,
     [userId, contract.id],
   );
   if (dupe) return none(`Already in ${contract.tradingsymbol} (trade #${dupe.id}).`);
+  const lostToday = await queryOne<{ id: string }>(
+    `SELECT id FROM live_trades WHERE user_id = $1 AND instrument_id = $2 AND status = 'CLOSED' AND net_pnl < 0
+        AND (closed_at AT TIME ZONE 'Asia/Kolkata')::date = (now() AT TIME ZONE 'Asia/Kolkata')::date LIMIT 1`,
+    [userId, contract.id],
+  );
+  if (lostToday) return none(`${contract.tradingsymbol} already lost money today; not buying it again today.`);
 
-  const limit = roundTick(plan.entryZone.high);
   const inserted = await queryOne<{ id: string }>(
     `INSERT INTO live_trades
        (user_id, signal_id, mode, broker, instrument_id, tradingsymbol, exchange, underlying, expiry,
         strike, option_type, action, product, lot_size, lots, quantity, entry_limit,
         grade, score, stop_premium, target1_premium, target2_premium,
-        underlying_stop, underlying_target1, underlying_target2, plan, scale_out, status)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::date,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26::jsonb,$27,'PENDING')
+        underlying_stop, underlying_target1, underlying_target2, plan, scale_out, strategy, status)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::date,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26::jsonb,$27,$28,'PENDING')
      RETURNING id`,
     [
-      userId, ev.signalId, mode, broker.manifest.id, contract.id, contract.tradingsymbol, contract.exchange,
-      d.underlying, d.expiry, d.setup.strike, d.setup.optionType, d.action, cfg.product, lotSize, lots, quantity,
-      limit, d.grade, d.score, plan.stopPremium, plan.target1Premium, plan.target2Premium,
-      plan.underlyingStop, plan.underlyingTarget1, plan.underlyingTarget2,
-      JSON.stringify({ ...plan, factors: d.factors, summary: d.summary }), cfg.scale_out,
+      userId, a.signalId, mode, broker.manifest.id, contract.id, contract.tradingsymbol, contract.exchange,
+      a.underlying, a.expiry, a.strike, a.optionType, a.action, a.product, a.lotSize, lots, quantity,
+      limit, a.grade, a.score, a.stopPremium, a.target1Premium, a.target2Premium,
+      a.underlyingStop, a.underlyingTarget1, a.underlyingTarget2,
+      JSON.stringify(a.plan), a.scaleOut, a.strategy,
     ],
   );
   const tradeId = Number(inserted!.id);
@@ -483,7 +641,7 @@ export async function executeLive(
   const req = {
     exchange: contract.exchange, tradingsymbol: contract.tradingsymbol, providerToken: token,
     side: 'BUY' as const, quantity, orderType: 'LIMIT' as const, price: limit,
-    product: cfg.product, tag: `BT${tradeId}`,
+    product: a.product, tag: `BT${tradeId}`,
   };
   try {
     const { orderId } = await broker.placeOrder!(req);
@@ -492,12 +650,12 @@ export async function executeLive(
       [tradeId, orderId],
     );
     await logBroker(tradeId, { event: 'entry_placed', request: req, orderId });
-    log.warn({ userId, tradeId, orderId, contract: contract.tradingsymbol, quantity, limit }, 'LIVE ENTRY ORDER PLACED');
+    log.warn({ userId, tradeId, orderId, contract: contract.tradingsymbol, quantity, limit, strategy: a.strategy }, 'LIVE ENTRY ORDER PLACED');
     await notify(userId, {
       kind: 'live', severity: 'action',
-      title: `Live order: buy ${lots} lot(s) ${contract.tradingsymbol}`,
-      message: `Limit ₹${limit.toFixed(2)} × ${quantity} (${mode} mode, grade ${d.grade}). Stop ₹${plan.stopPremium.toFixed(2)} / ${d.underlying} ${plan.underlyingStop.toFixed(0)}; targets ₹${plan.target1Premium.toFixed(2)} and ₹${plan.target2Premium.toFixed(2)}. Cancelled automatically if unfilled in ${cfg.entry_timeout_sec}s.`,
-      payload: { tradeId, orderId, limit, quantity }, link: '/live',
+      title: a.notifyTitle ?? `Live order: buy ${lots} lot(s) ${contract.tradingsymbol}`,
+      message: a.notifyMessage,
+      payload: { tradeId, orderId, limit, quantity, strategy: a.strategy }, link: '/live',
     });
     return { placed: true, reason: 'order placed', tradeId, orderId };
   } catch (err) {
@@ -737,16 +895,37 @@ export async function manageLiveExits(userId: string, registry?: ProviderRegistr
         [t.id, premium, maxFav, maxAdv],
       );
 
+      // Hero Zero carries its own, earlier, square-off in its frozen plan.
+      const planSquareOff = t.strategy === 'HERO_ZERO' ? Number((t.plan as { squareOffMin?: number } | null)?.squareOffMin) : NaN;
       const action = decideLiveExit({
         action: t.action, expiry: t.expiry, product: t.product,
         entryPremium: Number(t.entry_price), stopPremium: Number(t.stop_premium),
         target1Premium: Number(t.target1_premium), target2Premium: Number(t.target2_premium),
         underlyingStop: Number(t.underlying_stop), remainingQty: t.remaining_qty, lotSize: t.lot_size,
         t1Done: t.t1_done, scaleOut: t.scale_out,
-      }, { premium, spot, now: new Date(), squareOffMin });
+      }, { premium, spot, now: new Date(), squareOffMin: Number.isFinite(planSquareOff) ? planSquareOff : squareOffMin });
 
-      if (action.kind === 'HOLD') continue;
-      await placeExit(broker, t, action.qty, action.kind === 'BOOK_HALF' ? 'PARTIAL' : 'FULL', action.code, action.reason);
+      if (action.kind !== 'HOLD') {
+        await placeExit(broker, t, action.qty, action.kind === 'BOOK_HALF' ? 'PARTIAL' : 'FULL', action.code, action.reason);
+        continue;
+      }
+
+      // The plan's levels are intact; now ask whether the chart still agrees.
+      // Hero Zero is a momentum lottery with its own anchor and is left alone.
+      if (!(cfg?.direction_guard ?? true) || t.strategy === 'HERO_ZERO') continue;
+      const horizon = cfg?.horizon ?? 'intraday';
+      const read = await readDirection(reg, t.underlying, horizon);
+      const g = decideDirectionExit({
+        action: t.action, horizon, entryPremium: Number(t.entry_price), premium,
+        stopPremium: Number(t.stop_premium), target1Premium: Number(t.target1_premium),
+        maxFavourablePremium: maxFav,
+      }, read, { ...DEFAULT_GUARD, cutLoserAtR: Number(cfg?.cut_loser_at_r ?? 0.5) });
+      if (g.kind === 'EXIT') {
+        await placeExit(broker, t, t.remaining_qty, 'FULL', g.code, g.reason);
+      } else if (g.kind === 'RAISE_STOP') {
+        await tightenLiveStop(Number(t.id), g.newStop);
+        await notify(t.user_id, { kind: 'live', severity: 'info', title: `${t.tradingsymbol}: stop moved to breakeven`, message: g.reason, link: '/live' });
+      }
     } catch (err) {
       log.error({ err, tradeId: t.id }, 'Live exit management failed for this trade');
     }

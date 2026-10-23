@@ -3,6 +3,8 @@ import { z } from 'zod';
 import { asyncHandler, respond, requireAuth, validate } from '../../middleware/index.js';
 import { badRequest } from '../../utils/errors.js';
 import * as paper from './paper.service.js';
+import { registryForUser } from '../../providers/registry.js';
+import { RISK_LIMITS } from '../../config/riskLimits.js';
 import { adviseOnOpenPositions } from './advisor.js';
 import { getPaperStatus } from './status.service.js';
 
@@ -19,14 +21,27 @@ paperRouter.use(requireAuth);
 const configSchema = z.object({
   isEnabled: z.boolean().optional(),
   capital: z.number().positive().optional(),
-  riskPerTradePct: z.number().min(0.1).max(10).optional(),
+  riskPerTradePct: z.number().min(RISK_LIMITS.paper.riskPerTradePct.min).max(RISK_LIMITS.paper.riskPerTradePct.max).optional(),
   maxOpenPositions: z.number().int().min(1).max(20).optional(),
   maxTradesPerDay: z.number().int().min(1).max(50).optional(),
-  maxDailyLossPct: z.number().min(0.1).max(25).optional(),
+  maxDailyLossPct: z.number().min(RISK_LIMITS.paper.dailyLossPct.min).max(RISK_LIMITS.paper.dailyLossPct.max).optional(),
   minConfirmation: z.number().int().min(0).max(100).optional(),
   underlyings: z.array(z.string().min(1).max(20)).min(1).max(10).optional(),
   tradeOptions: z.boolean().optional(),
   tradeEquity: z.boolean().optional(),
+  intradayOnly: z.boolean().optional(),
+  entryCutoffMin: z.number().int().min(555).max(925).optional(),
+  squareOffMin: z.number().int().min(600).max(928).optional(),
+  directionGuard: z.boolean().optional(),
+  entryStartMin: z.number().int().min(555).max(925).optional(),
+  minGrade: z.enum(['A', 'B', 'C']).optional(),
+  requireTimingAgreement: z.boolean().optional(),
+  requireNamedSetup: z.boolean().optional(),
+  reentryCooldownMin: z.number().int().min(0).max(240).optional(),
+  cutLoserAtR: z.number().min(0).max(2).optional(),
+  stopAtrMultiple: z.number().min(0.5).max(3).optional(),
+  target1R: z.number().min(0.5).max(5).optional(),
+  target2R: z.number().min(0.75).max(10).optional(),
 });
 
 paperRouter.get(
@@ -66,10 +81,13 @@ paperRouter.get(
   validate(listSchema, 'query'),
   asyncHandler(async (req, res) => {
     const q = req.query as unknown as z.infer<typeof listSchema>;
-    respond(res, await paper.listTrades(req.user!.id, {
+    const rows = await paper.listTrades(req.user!.id, {
       ...(q.status ? { status: q.status } : {}),
       limit: q.limit,
-    }));
+    });
+    // Open rows carry a live "if closed now" mark so the screen and the ledger agree.
+    const registry = await registryForUser(req.user!.id);
+    respond(res, await paper.withOpenMarks(registry, rows));
   }),
 );
 

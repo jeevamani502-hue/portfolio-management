@@ -158,7 +158,23 @@ const schema = z.object({
 
   SMTP_URL: optional,
   ALERT_FROM_EMAIL: optional,
+  /**
+   * Email of the account whose stored broker credentials the shared background
+   * jobs (tick feed, breadth, scanner, alerts) use when more than one account
+   * has credentials. With a single credentialled account it is picked automatically.
+   */
+  BACKGROUND_JOBS_USER: optional,
+  /** Whether /auth/register accepts new accounts. Turn off once your own accounts exist on a public URL. */
+  ALLOW_REGISTRATION: bool(true),
   TELEGRAM_BOT_TOKEN: optional,
+  /** Twilio, for WhatsApp and SMS. All optional; the channel shows as "not configured" without them. */
+  TWILIO_ACCOUNT_SID: optional,
+  TWILIO_AUTH_TOKEN: optional,
+  TWILIO_SMS_FROM: optional,
+  TWILIO_WHATSAPP_FROM: optional,
+  /** TextBee: free SMS through your own Android phone (textbee.dev). API key from the dashboard; device id optional with the account-level endpoint. */
+  TEXTBEE_API_KEY: optional,
+  TEXTBEE_DEVICE_ID: optional,
   VAPID_PUBLIC_KEY: optional,
   VAPID_PRIVATE_KEY: optional,
 });

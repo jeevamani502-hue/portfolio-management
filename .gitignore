@@ -18,3 +18,7 @@ redisdata/
 
 # Local service logs written by scripts/restart.mjs
 logs/
+
+# Built Android packages
+*.apk
+*.aab

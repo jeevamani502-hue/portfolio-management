@@ -7,8 +7,11 @@
  * the router sends the user to sign-in.
  */
 import type { Sourced, ApiEnvelope, ApiError } from '@/types/api';
+import { getServerBase, usesBodyTokens, storedRefreshToken, storeRefreshToken } from '@/lib/server';
 
-const BASE = import.meta.env['VITE_API_BASE_URL'] ?? '';
+/** Resolved on every call so a server address saved on the sign-in screen takes effect at once. */
+const BASE = { toString: () => getServerBase() };
+const appHeaders = (): Record<string, string> => (usesBodyTokens() ? { 'x-client': 'app' } : {});
 
 let accessToken: string | null = null;
 let onUnauthorized: (() => void) | null = null;
@@ -59,14 +62,18 @@ export async function refreshAccessToken(): Promise<string | null> {
   // Collapse concurrent refreshes onto one in-flight request.
   refreshPromise ??= (async () => {
     try {
+      const bodyToken = usesBodyTokens() ? storedRefreshToken() : null;
+      if (usesBodyTokens() && !bodyToken) return null;
       const res = await fetch(`${BASE}/api/auth/refresh`, {
         method: 'POST',
         credentials: 'include',
-        headers: { 'content-type': 'application/json' },
+        headers: { 'content-type': 'application/json', ...appHeaders() },
+        body: JSON.stringify(bodyToken ? { refreshToken: bodyToken } : {}),
       });
       if (!res.ok) return null;
-      const json = (await res.json()) as ApiEnvelope<{ accessToken: string }>;
+      const json = (await res.json()) as ApiEnvelope<{ accessToken: string; refreshToken?: string }>;
       accessToken = json.data.accessToken;
+      if (json.data.refreshToken) storeRefreshToken(json.data.refreshToken);
       return accessToken;
     } catch {
       return null;
@@ -91,6 +98,7 @@ export async function request<T>(path: string, opts: RequestOptions = {}): Promi
       credentials: 'include',
       headers: {
         accept: 'application/json',
+        ...appHeaders(),
         ...(opts.body !== undefined ? { 'content-type': 'application/json' } : {}),
         ...(accessToken ? { authorization: `Bearer ${accessToken}` } : {}),
       },
@@ -149,6 +157,7 @@ export async function requestWithMeta<T>(
     credentials: 'include',
     headers: {
       accept: 'application/json',
+      ...appHeaders(),
       ...(opts.body !== undefined ? { 'content-type': 'application/json' } : {}),
       ...(accessToken ? { authorization: `Bearer ${accessToken}` } : {}),
     },
@@ -168,15 +177,19 @@ export async function requestWithMeta<T>(
 export const api = {
   auth: {
     login: (email: string, password: string) =>
-      request<{ user: AuthUserDto; accessToken: string; expiresIn: string }>('/auth/login', {
+      request<{ user: AuthUserDto; accessToken: string; expiresIn: string; refreshToken?: string }>('/auth/login', {
         method: 'POST', body: { email, password }, noRetry: true,
       }),
     register: (email: string, password: string, fullName?: string) =>
-      request<{ user: AuthUserDto; accessToken: string; expiresIn: string }>('/auth/register', {
+      request<{ user: AuthUserDto; accessToken: string; expiresIn: string; refreshToken?: string }>('/auth/register', {
         method: 'POST', body: { email, password, fullName }, noRetry: true,
       }),
     me: () => request<AuthUserDto>('/auth/me'),
-    logout: () => request<{ loggedOut: boolean }>('/auth/logout', { method: 'POST' }),
+    forgot: (email: string) => request<{ sent: boolean; via: string; message: string }>('/auth/forgot', { method: 'POST', body: { email }, noRetry: true }),
+    reset: (token: string, password: string) => request<{ reset: boolean; message: string }>('/auth/reset', { method: 'POST', body: { token, password }, noRetry: true }),
+    logout: () => request<{ loggedOut: boolean }>('/auth/logout', {
+      method: 'POST', body: usesBodyTokens() ? { refreshToken: storedRefreshToken() } : {},
+    }),
   },
 
   market: {
@@ -293,7 +306,7 @@ export const api = {
     decision: (
       symbol: string,
       params: {
-        capital: number; riskPercent: number; expiry?: string;
+        capital: number; riskPercent: number; expiry?: string; horizon?: 'intraday' | 'swing';
         biasTimeframe?: '1h' | '1d'; entryTimeframe?: '5m' | '15m' | '1h'; record?: boolean;
       },
     ) =>
@@ -302,6 +315,7 @@ export const api = {
           capital: String(params.capital),
           riskPercent: String(params.riskPercent),
           ...(params.expiry ? { expiry: params.expiry } : {}),
+          ...(params.horizon ? { horizon: params.horizon } : {}),
           ...(params.biasTimeframe ? { biasTimeframe: params.biasTimeframe } : {}),
           ...(params.entryTimeframe ? { entryTimeframe: params.entryTimeframe } : {}),
           ...(params.record === false ? { record: 'false' } : {}),
@@ -341,6 +355,11 @@ export const api = {
         },
       }),
     close: (id: string) => request<{ ok: boolean; reason: string }>(`/live/trades/${id}/close`, { method: 'POST' }),
+    heroZero: () => request<HeroZeroScanDto>('/live/hero-zero'),
+    executeHeroZero: (underlying: string) =>
+      request<{ placed: boolean; reason: string; tradeId: number | null; orderId: string | null }>(
+        '/live/hero-zero/execute', { method: 'POST', body: { underlying } },
+      ),
     sync: () => request<{ synced: boolean }>('/live/sync', { method: 'POST' }),
     performance: () => request<LivePerformanceDto>('/live/performance'),
   },
@@ -359,6 +378,12 @@ export const api = {
           ...(params.unread ? { unread: 'true' } : {}),
         },
       }),
+    channels: () => request<{ status: ChannelStatusDto; prefs: ChannelPrefsDto }>('/notifications/channels'),
+    saveChannels: (body: Partial<ChannelPrefsInput>) =>
+      request<ChannelPrefsDto>('/notifications/channels', { method: 'PUT', body }),
+    telegramLink: () => request<TelegramLinkDto>('/notifications/channels/telegram/link', { method: 'POST' }),
+    testChannel: (channel: 'telegram' | 'whatsapp' | 'sms' | 'callmebot') =>
+      request<{ sent: boolean; detail: string }>('/notifications/channels/test', { method: 'POST', body: { channel } }),
     markRead: (ids: number[]) =>
       request<{ updated: number }>('/notifications/read', { method: 'POST', body: { ids } }),
     markAllRead: () =>
@@ -444,6 +469,26 @@ export const api = {
     list: () => request<unknown[]>('/backtest'),
   },
 
+  reports: {
+    pnl: (from: string, to: string) => request<PnlReportDto>('/reports/pnl', { query: { from, to } }),
+  },
+
+  admin: {
+    overview: () => request<AdminOverviewDto>('/admin/overview'),
+    users: () => request<AdminUserDto[]>('/admin/users'),
+    user: (id: string) => request<AdminUserDetailDto>(`/admin/users/${id}`),
+    updateUser: (id: string, body: { role?: AdminUserDto['role']; isActive?: boolean; fullName?: string | null }) =>
+      request<{ updated: boolean }>(`/admin/users/${id}`, { method: 'PATCH', body }),
+    setPassword: (id: string, newPassword: string) =>
+      request<{ changed: boolean; message: string }>(`/admin/users/${id}/password`, { method: 'POST', body: { newPassword } }),
+    sendReset: (id: string, via?: 'email' | 'telegram' | 'sms') =>
+      request<{ sent: boolean; via: string; link: string | null; message: string }>(`/admin/users/${id}/password`, { method: 'POST', body: { sendResetLink: true, ...(via ? { via } : {}) } }),
+    logoutAll: (id: string) => request<{ revoked: number }>(`/admin/users/${id}/logout-all`, { method: 'POST' }),
+    deleteUser: (id: string) => request<{ deleted: boolean }>(`/admin/users/${id}`, { method: 'DELETE' }),
+    audit: (limit = 100) => request<AuditEntryDto[]>('/admin/audit', { query: { limit } }),
+    saveSettings: (body: { registrationOpen?: boolean }) => request<AdminOverviewDto>('/admin/settings', { method: 'PUT', body }),
+  },
+
   settings: {
     get: () => request<SettingsDto>('/settings'),
     patch: (body: Record<string, unknown>) =>
@@ -477,6 +522,8 @@ import type {
   StrategyDto, BacktestRunDto, SettingsDto, ProviderCatalogueDto, ConfiguredProviderDto,
   DataQualityEventDto,
   FnoDecisionDto, FnoSignalDto, SignalPerformanceDto, NotificationDto,
-  LiveStatusDto, LiveConfigDto, LiveFundsDto, LiveConfigInput, LiveTradeDto, LivePerformanceDto,
+  LiveStatusDto, LiveConfigDto, LiveFundsDto, HeroZeroScanDto,
+  ChannelStatusDto, ChannelPrefsDto, ChannelPrefsInput, TelegramLinkDto, PnlReportDto,
+  AdminOverviewDto, AdminUserDto, AdminUserDetailDto, AuditEntryDto, LiveConfigInput, LiveTradeDto, LivePerformanceDto,
   AgentSummaryDto,
 } from '@/types/api';

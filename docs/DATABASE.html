@@ -1,0 +1,470 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AdviSha database — every table and what it is for</title>
+<style>
+  :root{color-scheme:light dark;--fg:#1f2328;--bg:#ffffff;--muted:#59636e;--line:#d1d9e0;--code:#f6f8fa;--accent:#0969da;--star:#9a6700}
+  @media (prefers-color-scheme:dark){:root{--fg:#e6edf3;--bg:#0d1117;--muted:#9198a1;--line:#30363d;--code:#161b22;--accent:#4493f8;--star:#d29922}}
+  body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.6 -apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+  main{max-width:1000px;margin:0 auto;padding:32px 20px 64px}
+  h1{font-size:28px;margin:0 0 8px;border-bottom:1px solid var(--line);padding-bottom:10px}
+  h2{font-size:21px;margin:36px 0 12px;border-bottom:1px solid var(--line);padding-bottom:6px}
+  h3{font-size:17px;margin:24px 0 8px}
+  p{margin:0 0 12px}
+  a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}
+  table{border-collapse:collapse;width:100%;margin:12px 0 20px;font-size:14px}
+  th,td{border:1px solid var(--line);padding:8px 10px;vertical-align:top;text-align:left}
+  th{background:var(--code)}
+  td:first-child{white-space:nowrap;width:1%}
+  tr:has(td:first-child strong){background:color-mix(in srgb,var(--star) 8%,transparent)}
+  code{font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;background:var(--code);padding:1px 5px;border-radius:4px}
+  pre{background:var(--code);border:1px solid var(--line);border-radius:6px;padding:12px 14px;overflow-x:auto}
+  pre code{background:none;padding:0}
+  hr{border:0;border-top:1px solid var(--line);margin:28px 0}
+  .note{color:var(--muted);font-size:13px;margin-top:40px;border-top:1px solid var(--line);padding-top:12px}
+</style>
+</head>
+<body>
+<main>
+<h1>AdviSha database — every table and what it is for</h1>
+<p>PostgreSQL, schema <code>public</code>. The tables are created by the SQL files in
+<a href="../database/migrations/">database/migrations/</a>, applied in order by
+<code>npm run migrate</code>. The three tables most people ask about are marked
+<strong>★ users</strong>, <strong>★ profit</strong> and <strong>★ history</strong> below.</p>
+<p>Connect from the project root:</p>
+<pre><code class="language-bash">psql &quot;$(grep ^DATABASE_URL .env | cut -d= -f2-)&quot;
+</code></pre>
+<p>Money is stored in rupees as <code>NUMERIC</code>; timestamps are <code>TIMESTAMPTZ</code> (UTC) and
+should be read in IST with <code>AT TIME ZONE &#39;Asia/Kolkata&#39;</code>.</p>
+<hr>
+<h2>0. Server details</h2>
+<p>The database is <strong>PostgreSQL</strong> (plain, without the TimescaleDB extension). SQL is
+the language; PostgreSQL is the server that runs it. The app talks to it through
+the <code>pg</code> driver using <code>DATABASE_URL</code> in <code>.env</code>.</p>
+<table>
+<thead>
+<tr>
+<th>Item</th>
+<th>Value</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Engine</td>
+<td>PostgreSQL 17.6, 64-bit Windows build</td>
+</tr>
+<tr>
+<td>Host and port</td>
+<td><code>127.0.0.1:5433</code> (local only; not reachable from the network)</td>
+</tr>
+<tr>
+<td>Database name</td>
+<td><code>market_ai</code></td>
+</tr>
+<tr>
+<td>Database user</td>
+<td><code>market</code> (password in <code>.env</code>, never in this document)</td>
+</tr>
+<tr>
+<td>Data directory</td>
+<td><code>C:\Jeevamani\bt-pgdata</code></td>
+</tr>
+<tr>
+<td>Binaries</td>
+<td><code>C:\Program Files\PostgreSQL\17\bin</code> (<code>psql.exe</code>, <code>pg_ctl.exe</code>, <code>pg_dump.exe</code>)</td>
+</tr>
+<tr>
+<td>Size on disk</td>
+<td>about 377 MB, most of it the instrument master and option-chain snapshots</td>
+</tr>
+<tr>
+<td>Encoding and time zone</td>
+<td>UTF-8; server time zone Asia/Calcutta (the app reads and writes UTC)</td>
+</tr>
+<tr>
+<td>Schema version</td>
+<td>18 migrations applied, tracked in <code>schema_migrations</code></td>
+</tr>
+<tr>
+<td>Started by</td>
+<td><code>npm run restart</code> (<code>scripts/restart.mjs</code>), which starts the cluster with <code>pg_ctl</code> if it is not already running, then the API, worker and web server</td>
+</tr>
+<tr>
+<td>Cache</td>
+<td>in-memory substitute for Redis (<code>USE_IN_MEMORY_REDIS=true</code>); nothing cached survives a restart</td>
+</tr>
+</tbody></table>
+<p>The application processes that use it, all on this machine:</p>
+<table>
+<thead>
+<tr>
+<th>Process</th>
+<th>Address</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>API</td>
+<td><code>http://localhost:4000</code> (<code>/health</code> for status)</td>
+<td>REST API and WebSocket tick feed; also serves the built frontend in production</td>
+</tr>
+<tr>
+<td>Worker</td>
+<td>no port</td>
+<td>Scheduled jobs: paper and live sweeps, alerts, news, signal tracker, briefings</td>
+</tr>
+<tr>
+<td>Web</td>
+<td><code>http://localhost:5173</code></td>
+<td>Vite dev server for the React frontend</td>
+</tr>
+<tr>
+<td>Node.js</td>
+<td>v22.12.0</td>
+<td>Runtime for all three</td>
+</tr>
+<tr>
+<td>Logs</td>
+<td><code>logs/api.log</code>, <code>logs/worker.log</code>, <code>logs/web.log</code></td>
+<td>One file per process, JSON lines</td>
+</tr>
+</tbody></table>
+<p>Connect and inspect:</p>
+<pre><code class="language-bash"># from the project root
+psql &quot;$(grep ^DATABASE_URL .env | cut -d= -f2-)&quot;
+
+# or directly
+&quot;C:\Program Files\PostgreSQL\17\bin\psql.exe&quot; -h 127.0.0.1 -p 5433 -U market -d market_ai
+</code></pre>
+<h3>Connecting with pgAdmin (the &quot;Let&#39;s connect to the server&quot; dialog)</h3>
+<p>Fill the dialog exactly like this; leave every field not listed empty.</p>
+<table>
+<thead>
+<tr>
+<th>Field in pgAdmin</th>
+<th>What to enter</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Existing Server (Optional)</td>
+<td>leave empty the first time</td>
+</tr>
+<tr>
+<td>Server Name</td>
+<td>any label you like, for example <code>AdviSha local</code></td>
+</tr>
+<tr>
+<td>Host name/address</td>
+<td><code>127.0.0.1</code></td>
+</tr>
+<tr>
+<td>Port</td>
+<td><code>5433</code></td>
+</tr>
+<tr>
+<td>Database</td>
+<td><code>market_ai</code></td>
+</tr>
+<tr>
+<td>User</td>
+<td><code>market</code></td>
+</tr>
+<tr>
+<td>Password</td>
+<td>the text between <code>market:</code> and <code>@</code> in the <code>DATABASE_URL</code> line of the project&#39;s <code>.env</code> file</td>
+</tr>
+<tr>
+<td>Role</td>
+<td>leave empty</td>
+</tr>
+<tr>
+<td>Service</td>
+<td>leave empty</td>
+</tr>
+<tr>
+<td>Connection Parameters</td>
+<td>nothing to add; SSL is not used on a local connection</td>
+</tr>
+</tbody></table>
+<p>Then press <strong>Connect &amp; Open Query Tool</strong>. The port is 5433, not PostgreSQL&#39;s usual
+5432, because the cluster was created on a separate port; if the connection is
+refused, the database is not running yet: run <code>npm run restart</code> from the project
+root and try again. Any query from section 6 below can be pasted straight into
+the Query Tool; replace <code>:&#39;uid&#39;</code> with your user id in quotes.</p>
+<p>In production (<a href="DEPLOY-ORACLE.md">docs/DEPLOY-ORACLE.md</a>) the same schema runs in the
+official <code>postgres:17-alpine</code> container, reachable only from the other containers,
+with a real Redis beside it.</p>
+<hr>
+<h2>1. Users and their settings</h2>
+<table>
+<thead>
+<tr>
+<th>Table</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>★ <code>users</code></strong></td>
+<td>One row per login. <code>id</code> (UUID) is the key every other user-owned table references. Columns: <code>email</code>, <code>password_hash</code> (bcrypt, never the password), <code>full_name</code>, <code>role</code>, <code>is_active</code>, <code>email_verified</code>, <code>last_login_at</code>, <code>created_at</code>, <code>updated_at</code>.</td>
+</tr>
+<tr>
+<td><code>user_settings</code></td>
+<td>One row per user: notional <code>capital</code>, <code>max_risk_per_trade_pct</code>, <code>max_daily_loss_pct</code>, <code>max_open_positions</code>, <code>default_timeframe</code>, <code>theme</code>, and the phone-alert preferences: <code>notify_browser / notify_email / notify_telegram / notify_whatsapp / notify_sms</code>, <code>telegram_chat_id</code>, <code>phone_e164</code>, <code>notify_kinds</code>, <code>notify_min_severity</code>, <code>telegram_link_code</code>.</td>
+</tr>
+<tr>
+<td><code>refresh_tokens</code></td>
+<td>Login sessions. Hashed refresh tokens with <code>family_id</code> for rotation, <code>user_agent</code>, <code>ip</code>, <code>expires_at</code>, <code>revoked_at</code>. Deleting a user&#39;s rows here logs them out everywhere.</td>
+</tr>
+<tr>
+<td><code>api_providers</code></td>
+<td>Broker and data-provider credentials per user (Angel One, Groww, Dhan, Kite), AES-256-GCM encrypted in <code>credentials_enc</code>. Also <code>is_enabled</code>, <code>priority</code>, <code>health_status</code>, <code>last_error</code>, <code>token_expires_at</code>.</td>
+</tr>
+<tr>
+<td><code>audit_logs</code></td>
+<td>Who did what: every money-moving or credential-changing API call with <code>action</code>, <code>resource</code>, <code>resource_id</code>, <code>ip</code>, <code>user_agent</code>, <code>metadata</code>. Append-only.</td>
+</tr>
+</tbody></table>
+<hr>
+<h2>2. Trading accounts and their trades (profit lives here)</h2>
+<h3>Paper trading</h3>
+<table>
+<thead>
+<tr>
+<th>Table</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>paper_trade_config</code></td>
+<td>One row per user: <code>is_enabled</code>, <code>capital</code>, <code>risk_per_trade_pct</code>, <code>max_open_positions</code>, <code>max_trades_per_day</code>, <code>max_daily_loss_pct</code>, <code>min_confirmation</code>, <code>underlyings</code>, <code>intraday_only</code>, <code>entry_cutoff_min</code>, <code>square_off_min</code>, <code>direction_guard</code>, <code>halted_reason</code>.</td>
+</tr>
+<tr>
+<td><strong>★ <code>paper_trades</code></strong></td>
+<td><strong>Profit and history for paper trading.</strong> One row per simulated position: <code>tradingsymbol</code>, <code>underlying</code>, <code>kind</code>, <code>quantity</code>, <code>lot_size</code>, <code>entry_price</code>, <code>entry_at</code>, <code>stop_price</code>, <code>target_price</code>, <code>underlying_stop</code>, <code>confirmation</code> (checklist score at entry), <code>rationale</code>, <code>evidence</code> (the full checklist, frozen), <code>status</code> OPEN/CLOSED, <code>exit_price</code>, <code>exit_at</code>, <code>exit_reason</code> (TARGET, STOP, EOD, THESIS, GIVEBACK, NEWS, MANUAL, EXPIRY), <strong><code>gross_pnl</code>, <code>costs</code>, <code>net_pnl</code></strong>, <code>max_favourable_premium</code>.</td>
+</tr>
+</tbody></table>
+<h3>Live trading (real money)</h3>
+<table>
+<thead>
+<tr>
+<th>Table</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>live_trade_config</code></td>
+<td>One row per user: <code>mode</code> OFF/CONFIRM/AUTO, <code>armed_until</code>, <code>capital</code> (read from the broker when arming), risk and position caps, entry window, <code>square_off_min</code>, <code>product</code>, <code>horizon</code>, <code>direction_guard</code>, the Hero Zero settings (<code>hero_zero_*</code>), <code>kill_switch</code>, <code>halted_reason</code>, <code>last_sweep_result</code>.</td>
+</tr>
+<tr>
+<td><strong>★ <code>live_trades</code></strong></td>
+<td><strong>Profit and history for real trades.</strong> One row per order sent to the broker: contract, <code>strategy</code> CHECKLIST/HERO_ZERO, <code>mode</code>, <code>lots</code>, <code>quantity</code>, <code>entry_order_id</code>, <code>entry_limit</code>, <code>entry_price</code>, <code>grade</code>, <code>score</code>, the frozen plan (<code>stop_premium</code>, <code>target1_premium</code>, <code>target2_premium</code>, <code>underlying_stop</code>, <code>plan</code>), <code>remaining_qty</code>, <code>t1_done</code>, exit order fields, <code>exits</code> (every sell leg), <code>exit_code</code>, <strong><code>gross_pnl</code>, <code>costs</code>, <code>net_pnl</code></strong>, <code>closed_at</code>, <code>status</code> PENDING/OPEN/EXITING/CLOSED/FAILED, <code>broker_log</code> (every request and reply, verbatim).</td>
+</tr>
+</tbody></table>
+<h3>F&amp;O signal journal (the track record)</h3>
+<table>
+<thead>
+<tr>
+<th>Table</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>★ <code>fno_signals</code></strong></td>
+<td><strong>History of every call the engine issued</strong>, whether or not anyone traded it. <code>underlying</code>, <code>expiry</code>, <code>strike</code>, <code>option_type</code>, <code>action</code>, <code>grade</code>, <code>score</code>, <code>horizon</code>, <code>timeframe</code>, the plan at issue, <code>origin</code> alert/paper/manual/live, <code>status</code> ACTIVE/TARGET1_HIT/TARGET2_HIT/STOPPED/INVALIDATED/EXPIRED/TIMED_OUT, <code>last_premium</code>, <code>max_favourable_premium</code>, <code>max_adverse_premium</code>, <strong><code>r_multiple</code></strong> (result in units of risk), <code>notes</code>, <code>generated_at</code>, <code>resolved_at</code>. The Track Record page is computed from this table.</td>
+</tr>
+</tbody></table>
+<h3>Long-term portfolio (holdings you own)</h3>
+<table>
+<thead>
+<tr>
+<th>Table</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>portfolios</code></td>
+<td>Named portfolios per user.</td>
+</tr>
+<tr>
+<td><code>portfolio_holdings</code></td>
+<td>Current positions in each portfolio with average cost.</td>
+</tr>
+<tr>
+<td><code>transactions</code></td>
+<td>Every buy and sell: <code>side</code>, <code>quantity</code>, <code>price</code>, <code>amount</code>, <code>charges</code>, <code>traded_at</code>, <code>source</code>, <code>notes</code>. Realised profit comes from these.</td>
+</tr>
+<tr>
+<td><code>portfolio_snapshots</code></td>
+<td><strong>Daily history of each portfolio</strong>: <code>snapshot_date</code>, <code>invested</code>, <code>market_value</code>, <code>realized_pnl</code>, <code>unrealized_pnl</code>, <code>day_pnl</code>, <code>cash_flow</code>, <code>holdings_count</code>. Written once an hour by the worker.</td>
+</tr>
+</tbody></table>
+<hr>
+<h2>3. Alerts, notifications and the agent</h2>
+<table>
+<thead>
+<tr>
+<th>Table</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>alerts</code></td>
+<td>Alert definitions per user: <code>kind</code> (PRICE_ABOVE, FNO_SETUP, NEWS_FNO, …), <code>params</code>, <code>timeframe</code>, <code>channels</code>, <code>is_active</code>, <code>cooldown_sec</code>.</td>
+</tr>
+<tr>
+<td><code>alert_events</code></td>
+<td><strong>History of every alert firing</strong>: <code>triggered_at</code>, <code>observed</code> (the numbers that fired it), <code>source</code>, <code>data_as_of</code>, <code>delivered</code>.</td>
+</tr>
+<tr>
+<td><code>user_notifications</code></td>
+<td>The bell in the header, persisted: <code>kind</code> (alert, fno_entry, fno_exit, paper, paper_advice, live, system), <code>severity</code>, <code>title</code>, <code>message</code>, <code>payload</code>, <code>link</code>, <code>read_at</code>. Phone channels are sent from the same rows.</td>
+</tr>
+</tbody></table>
+<hr>
+<h2>4. Market data (shared, not per user)</h2>
+<table>
+<thead>
+<tr>
+<th>Table</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>instruments</code></td>
+<td>The instrument master: every stock, index, future and option contract with exchange, lot size, expiry, strike and per-provider tokens. About 350,000 rows; refreshed twice a day.</td>
+</tr>
+<tr>
+<td><code>candles</code></td>
+<td>OHLCV bars by instrument and timeframe, the store behind every chart and every indicator.</td>
+</tr>
+<tr>
+<td><code>ticks</code></td>
+<td>Last-traded ticks when stored.</td>
+</tr>
+<tr>
+<td><code>market_prices</code></td>
+<td>Latest quote per instrument.</td>
+</tr>
+<tr>
+<td><code>option_chain_snapshots</code></td>
+<td>Option chains as captured, for IV percentile and analytics.</td>
+</tr>
+<tr>
+<td><code>futures_snapshots</code></td>
+<td>Futures prices and open interest by expiry.</td>
+</tr>
+<tr>
+<td><code>market_breadth</code></td>
+<td>Advance/decline counts and sector aggregates over time.</td>
+</tr>
+<tr>
+<td><code>technical_indicators</code></td>
+<td>Cached indicator values.</td>
+</tr>
+<tr>
+<td><code>market_signals</code></td>
+<td>Rule-engine setups found by the scanner, with <code>rules_passed</code>, <code>scores</code>, <code>expires_at</code>.</td>
+</tr>
+<tr>
+<td><code>trade_ideas</code></td>
+<td>Scanner ideas derived from signals: entry zone, invalidation, targets, reasons.</td>
+</tr>
+<tr>
+<td><code>fundamentals</code>, <code>financial_results</code></td>
+<td>Company fundamentals and quarterly results where a provider supplies them.</td>
+</tr>
+<tr>
+<td><code>news_articles</code>, <code>news_entities</code></td>
+<td>Polled news and the instruments each article mentions, used by NEWS_FNO alerts and the news guard.</td>
+</tr>
+<tr>
+<td><code>trading_holidays</code></td>
+<td>NSE holiday calendar for the market clock.</td>
+</tr>
+<tr>
+<td><code>data_quality_events</code></td>
+<td>Every provider error, stale read or fallback, so a bad number can be traced to its source.</td>
+</tr>
+</tbody></table>
+<hr>
+<h2>5. Research and AI</h2>
+<table>
+<thead>
+<tr>
+<th>Table</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>backtests</code></td>
+<td>One row per backtest run with its parameters and summary statistics: <code>total_return_pct</code>, <code>max_drawdown_pct</code>, <code>win_rate</code>, <code>profit_factor</code>, <code>sharpe</code>, <code>equity_curve</code>.</td>
+</tr>
+<tr>
+<td><code>backtest_trades</code></td>
+<td>Every simulated trade of a backtest with <code>gross_pnl</code>, <code>charges</code>, <code>net_pnl</code>, <code>mae</code>, <code>mfe</code>.</td>
+</tr>
+<tr>
+<td><code>watchlists</code>, <code>watchlist_items</code></td>
+<td>User watchlists.</td>
+</tr>
+<tr>
+<td><code>ai_conversations</code>, <code>ai_messages</code></td>
+<td>The AI analyst chat, per user.</td>
+</tr>
+<tr>
+<td><code>analysis_logs</code></td>
+<td>What evidence each AI answer used and whether the validator passed it.</td>
+</tr>
+<tr>
+<td><code>schema_migrations</code></td>
+<td>Which migration files have been applied. Managed by <code>npm run migrate</code>.</td>
+</tr>
+</tbody></table>
+<hr>
+<h2>6. Useful queries</h2>
+<p>Profit and loss for one user, paper and live, by day (IST):</p>
+<pre><code class="language-sql">SELECT day, SUM(net) AS net_pnl, COUNT(*) AS trades
+FROM (
+  SELECT (exit_at AT TIME ZONE &#39;Asia/Kolkata&#39;)::date AS day, net_pnl AS net
+    FROM paper_trades WHERE status = &#39;CLOSED&#39; AND user_id = :&#39;uid&#39;
+  UNION ALL
+  SELECT (closed_at AT TIME ZONE &#39;Asia/Kolkata&#39;)::date, net_pnl
+    FROM live_trades WHERE status = &#39;CLOSED&#39; AND user_id = :&#39;uid&#39;
+) t
+GROUP BY day ORDER BY day DESC;
+</code></pre>
+<p>Trade history with the reason each one closed:</p>
+<pre><code class="language-sql">SELECT tradingsymbol, quantity, entry_price, exit_price, exit_reason, net_pnl,
+       entry_at AT TIME ZONE &#39;Asia/Kolkata&#39; AS entered,
+       exit_at  AT TIME ZONE &#39;Asia/Kolkata&#39; AS exited
+FROM paper_trades
+WHERE user_id = :&#39;uid&#39;
+ORDER BY entry_at DESC;
+</code></pre>
+<p>Hit rate of the engine&#39;s calls by grade (what the Track Record page shows):</p>
+<pre><code class="language-sql">SELECT grade,
+       COUNT(*) FILTER (WHERE status &lt;&gt; &#39;ACTIVE&#39;) AS resolved,
+       COUNT(*) FILTER (WHERE r_multiple &gt; 0) AS wins,
+       ROUND(AVG(r_multiple) FILTER (WHERE status &lt;&gt; &#39;ACTIVE&#39;), 2) AS avg_r
+FROM fno_signals
+WHERE user_id = :&#39;uid&#39;
+GROUP BY grade ORDER BY grade;
+</code></pre>
+<p>Find your user id:</p>
+<pre><code class="language-sql">SELECT id, email, created_at FROM users;
+</code></pre>
+<hr>
+<h2>7. Backup</h2>
+<p>The three tables that cannot be rebuilt from providers are <code>users</code>,
+<code>api_providers</code> (encrypted broker credentials) and the trade tables
+(<code>paper_trades</code>, <code>live_trades</code>, <code>fno_signals</code>, <code>transactions</code>). Back up the whole
+database before any upgrade:</p>
+<pre><code class="language-bash">pg_dump &quot;$(grep ^DATABASE_URL .env | cut -d= -f2-)&quot; | gzip &gt; backup-$(date +%F).sql.gz
+</code></pre>
+
+
+<p class="note">Generated from <code>docs/DATABASE.md</code> by <code>scripts/build-db-doc.mjs</code>. Edit the Markdown and rebuild rather than editing this file.</p>
+</main>
+</body>
+</html>

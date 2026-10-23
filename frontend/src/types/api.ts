@@ -927,6 +927,19 @@ export interface PaperConfigDto {
   underlyings: string[];
   trade_options: boolean;
   trade_equity: boolean;
+  intraday_only: boolean;
+  entry_cutoff_min: number;
+  square_off_min: number;
+  direction_guard: boolean;
+  entry_start_min: number;
+  min_grade: 'A' | 'B' | 'C';
+  require_timing_agreement: boolean;
+  require_named_setup: boolean;
+  reentry_cooldown_min: number;
+  cut_loser_at_r: string;
+  stop_atr_multiple: string;
+  target1_r: string;
+  target2_r: string;
   halted_reason: string | null;
   halted_at: string | null;
 }
@@ -942,6 +955,19 @@ export interface PaperConfigInput {
   underlyings: string[];
   tradeOptions: boolean;
   tradeEquity: boolean;
+  intradayOnly: boolean;
+  entryCutoffMin: number;
+  squareOffMin: number;
+  directionGuard: boolean;
+  entryStartMin: number;
+  minGrade: 'A' | 'B' | 'C';
+  requireTimingAgreement: boolean;
+  requireNamedSetup: boolean;
+  reentryCooldownMin: number;
+  cutLoserAtR: number;
+  stopAtrMultiple: number;
+  target1R: number;
+  target2R: number;
 }
 
 export interface PaperPerformanceDto {
@@ -986,6 +1012,17 @@ export interface PaperTradeDto {
   gross_pnl: string | null;
   costs: string | null;
   net_pnl: string | null;
+  /** Open rows only: what a close right now would produce, from the same fill model the close uses. */
+  mark: {
+    ltp: number;
+    bid: number | null;
+    exitPrice: number;
+    exitDiscount: number;
+    costEstimate: number;
+    grossNow: number;
+    netIfClosedNow: number;
+    asOf: string | null;
+  } | null;
 }
 
 export interface PaperSweepDto {
@@ -1176,6 +1213,8 @@ export interface FnoSignalDto {
   id: number;
   underlying: string;
   expiry: string;
+  horizon?: 'intraday' | 'swing';
+  timeframe?: string;
   strike: number;
   optionType: 'CE' | 'PE';
   tradingsymbol: string | null;
@@ -1250,6 +1289,27 @@ export interface LiveConfigDto {
   product: 'INTRADAY' | 'CARRYFORWARD';
   scale_out: boolean;
   entry_timeout_sec: number;
+  hero_zero_enabled: boolean;
+  hero_zero_budget: string;
+  hero_zero_min_premium: string;
+  hero_zero_max_premium: string;
+  hero_zero_max_lots: number;
+  hero_zero_max_trades_per_day: number;
+  hero_zero_window_start_min: number;
+  hero_zero_window_end_min: number;
+  hero_zero_square_off_min: number;
+  hero_zero_stop_pct: string;
+  hero_zero_target_multiple: string;
+  hero_zero_min_agree: number;
+  horizon: 'intraday' | 'swing';
+  direction_guard: boolean;
+  require_timing_agreement: boolean;
+  require_named_setup: boolean;
+  reentry_cooldown_min: number;
+  cut_loser_at_r: string;
+  stop_atr_multiple: string;
+  target1_r: string;
+  target2_r: string;
   kill_switch: boolean;
   halted_reason: string | null;
   halted_at: string | null;
@@ -1259,6 +1319,27 @@ export interface LiveConfigDto {
 
 export interface LiveConfigInput {
   mode: LiveMode;
+  heroZeroEnabled: boolean;
+  heroZeroBudget: number;
+  heroZeroMinPremium: number;
+  heroZeroMaxPremium: number;
+  heroZeroMaxLots: number;
+  heroZeroMaxTradesPerDay: number;
+  heroZeroWindowStartMin: number;
+  heroZeroWindowEndMin: number;
+  heroZeroSquareOffMin: number;
+  heroZeroStopPct: number;
+  heroZeroTargetMultiple: number;
+  heroZeroMinAgree: number;
+  horizon: 'intraday' | 'swing';
+  directionGuard: boolean;
+  requireTimingAgreement: boolean;
+  requireNamedSetup: boolean;
+  reentryCooldownMin: number;
+  cutLoserAtR: number;
+  stopAtrMultiple: number;
+  target1R: number;
+  target2R: number;
   riskPerTradePct: number;
   maxOpenPositions: number;
   maxLotsPerTrade: number;
@@ -1348,7 +1429,69 @@ export interface LiveTradeDto {
   closed_at: string | null;
   status: LiveTradeStatus;
   failure_reason: string | null;
+  strategy: 'CHECKLIST' | 'HERO_ZERO';
   created_at: string;
+}
+
+// ── hero zero ───────────────────────────────────────────────────────────────
+
+export interface HeroZeroFactorDto {
+  code: string;
+  label: string;
+  status: 'AGREE' | 'AGAINST' | 'UNREADABLE';
+  detail: string;
+}
+
+export interface HeroZeroCandidateDto {
+  strike: number;
+  optionType: 'CE' | 'PE';
+  action: 'BUY_CALL' | 'BUY_PUT';
+  premium: number;
+  bid: number | null;
+  ask: number | null;
+  oi: number | null;
+  volume: number | null;
+  lotSize: number;
+  lots: number;
+  quantity: number;
+  limit: number;
+  outlay: number;
+  stopPremium: number;
+  target1Premium: number;
+  target2Premium: number;
+  underlyingStop: number;
+  otmPct: number;
+}
+
+export interface HeroZeroDecisionDto {
+  underlying: string;
+  expiry: string;
+  daysToExpiry: number;
+  spot: number | null;
+  side: 'BUY_CALL' | 'BUY_PUT' | null;
+  stance: 'ENTER' | 'WAIT' | 'AVOID';
+  agreeing: number;
+  readable: number;
+  factors: HeroZeroFactorDto[];
+  gates: Array<{ code: string; ok: boolean; detail: string }>;
+  candidate: HeroZeroCandidateDto | null;
+  candidateNote: string | null;
+  summary: string;
+  warning: string;
+  asOf: string;
+}
+
+export interface HeroZeroScanDto {
+  enabled: boolean;
+  config: {
+    budget: number; minPremium: number; maxPremium: number; maxLots: number;
+    windowStartMin: number; windowEndMin: number; squareOffMin: number;
+    stopPct: number; targetMultiple: number; minAgree: number;
+  };
+  attemptsToday: number;
+  blockers: LiveBlockerDto[];
+  results: Array<{ underlying: string; decision: HeroZeroDecisionDto | null; error: string | null }>;
+  warning: string;
 }
 
 export interface LivePerformanceDto {
@@ -1406,7 +1549,7 @@ export interface AgentSummaryDto {
 
 export interface NotificationDto {
   id: number;
-  kind: 'alert' | 'fno_entry' | 'fno_exit' | 'paper_advice' | 'live' | 'system';
+  kind: NotificationKind;
   severity: 'info' | 'action' | 'warning';
   title: string;
   message: string;
@@ -1414,4 +1557,106 @@ export interface NotificationDto {
   link: string | null;
   createdAt: string;
   readAt: string | null;
+}
+
+export type NotificationKind = 'alert' | 'fno_entry' | 'fno_exit' | 'paper' | 'paper_advice' | 'live' | 'system';
+
+// ── phone channels ──────────────────────────────────────────────────────────
+
+export interface ChannelStatusDto {
+  telegram: { configured: boolean; botUsername: string | null };
+  whatsapp: { configured: boolean };
+  sms: { configured: boolean; provider: 'textbee' | 'twilio' | null };
+  callmebot: { configured: boolean; activationNumber: string };
+}
+
+// ── admin ───────────────────────────────────────────────────────────────────
+
+export interface AdminOverviewDto {
+  users: { total: number; active: number; admins: number; withBroker: number };
+  trading: { paperEnabled: number; liveArmed: number; openPaper: number; openLive: number; paperNetToday: number; liveNetToday: number };
+  registrationOpen: boolean;
+  registrationSource: 'admin' | 'env';
+  backgroundJobsUser: string | null;
+  channels: ChannelStatusDto;
+}
+
+export interface AdminUserDto {
+  id: string;
+  email: string;
+  fullName: string | null;
+  role: 'user' | 'analyst' | 'admin';
+  isActive: boolean;
+  createdAt: string;
+  lastLoginAt: string | null;
+  providers: Array<{ provider: string; enabled: boolean; health: string | null }>;
+  paper: { enabled: boolean; openPositions: number; tradesToday: number; netToday: number; netAll: number } | null;
+  live: { mode: string; armed: boolean; openPositions: number; netToday: number; netAll: number } | null;
+  phone: string | null;
+  telegramLinked: boolean;
+}
+
+export interface AdminUserDetailDto {
+  user: AdminUserDto;
+  paperPerformance: PaperPerformanceDto | null;
+  paperTrades: PaperTradeDto[];
+  livePerformance: LivePerformanceDto | null;
+  liveTrades: LiveTradeDto[];
+  portfolio: { holdings: number; invested: number | null; marketValue: number | null; asOf: string | null };
+  notifications: { total: number; unread: number };
+  audit: Array<{ action: string; resource: string | null; ip: string | null; at: string }>;
+  sessions: number;
+}
+
+export interface AuditEntryDto {
+  email: string | null; action: string; resource: string | null; resourceId: string | null; ip: string | null; at: string;
+}
+
+export interface ChannelPrefsDto {
+  telegram: { enabled: boolean; linked: boolean; pendingCode: string | null; pendingUntil: string | null };
+  whatsapp: { enabled: boolean };
+  sms: { enabled: boolean };
+  callmebot: { enabled: boolean; configured: boolean };
+  phone: string | null;
+  kinds: NotificationKind[];
+  minSeverity: 'info' | 'action' | 'warning';
+}
+
+export interface ChannelPrefsInput {
+  telegramEnabled: boolean;
+  whatsappEnabled: boolean;
+  smsEnabled: boolean;
+  phone: string | null;
+  kinds: NotificationKind[];
+  minSeverity: 'info' | 'action' | 'warning';
+  unlinkTelegram: boolean;
+  callmebotEnabled: boolean;
+  callmebotApiKey: string | null;
+}
+
+// ── reports ─────────────────────────────────────────────────────────────────
+
+export interface CostSplitDto {
+  brokerage: number; exchangeTxn: number; sebi: number; stampDuty: number; stt: number; gst: number;
+  charges: number; taxes: number; total: number;
+}
+export interface ReportTradeDto {
+  id: string; symbol: string; quantity: number; entryPrice: number; exitPrice: number | null; exitedAt: string;
+  day: string; reason: string | null; gross: number; costs: CostSplitDto; net: number;
+}
+export interface DayRowDto { day: string; trades: number; gross: number; charges: number; taxes: number; net: number }
+export interface AccountReportDto {
+  account: 'paper' | 'live'; trades: number; wins: number; losses: number; gross: number; costs: CostSplitDto; net: number;
+  byDay: DayRowDto[]; rows: ReportTradeDto[]; note: string;
+}
+export interface PnlReportDto {
+  from: string; to: string; paper: AccountReportDto; live: AccountReportDto;
+  combined: { gross: number; charges: number; taxes: number; net: number; trades: number };
+}
+
+export interface TelegramLinkDto {
+  code: string;
+  botUsername: string | null;
+  deepLink: string | null;
+  expiresAt: string;
 }

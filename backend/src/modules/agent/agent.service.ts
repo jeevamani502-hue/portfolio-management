@@ -175,7 +175,10 @@ export async function morningPlan(userId: string): Promise<boolean> {
   }
   for (const u of underlyings) {
     try {
-      const ev = await evaluateUnderlying(registry, u, { capital, riskPercent: riskPct, record: null });
+      const ev = await evaluateUnderlying(registry, u, {
+        capital, riskPercent: riskPct, record: null,
+        horizon: cfg?.intraday_only === false ? 'swing' : 'intraday',
+      });
       if (!isAvailable(ev.result)) { lines.push(`${u}: no read — ${ev.result.detail ?? ev.result.reason}.`); continue; }
       const d = ev.result.value;
       const plan = d.plan;

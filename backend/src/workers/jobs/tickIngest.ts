@@ -19,7 +19,7 @@ import { redis } from '../../cache/redis.js';
 import { K, TTL } from '../../cache/keys.js';
 import { getWorkerRegistry } from '../../providers/registry.js';
 import * as instrumentsRepo from '../../db/repositories/instruments.js';
-import type { TickStream, NormalizedTick } from '../../providers/types.js';
+import type { TickStream, NormalizedTick, Exchange } from '../../providers/types.js';
 
 const log = logger.child({ job: 'tick-ingest' });
 
@@ -56,7 +56,7 @@ function publishFeedStatus(connected: boolean): void {
 
 /** Instruments worth streaming, most important first. */
 async function instrumentsToWatch(): Promise<
-  Array<{ id: number; token: string; symbol: string }>
+  Array<{ id: number; token: string; symbol: string; exchange: Exchange }>
 > {
   const rows = await queryRows<{ id: number; provider_tokens: Record<string, string> | null; tradingsymbol: string; exchange: string }>(
     `SELECT DISTINCT i.id, i.provider_tokens, i.tradingsymbol, i.exchange
@@ -89,6 +89,7 @@ async function instrumentsToWatch(): Promise<
       id: r.id,
       token: r.provider_tokens?.['angelone'] ?? '',
       symbol: `${r.exchange}:${r.tradingsymbol}`,
+      exchange: r.exchange as Exchange,
     }))
     .filter((r) => r.token);
 }
@@ -125,6 +126,7 @@ export async function startTickIngest(): Promise<boolean> {
 
   stream = await provider.openTickStream!({
     tokens: watch.map((w) => w.token),
+    exchangeFor: (token) => instrumentByToken.get(token)?.exchange,
     onTick: (tick: NormalizedTick) => {
       const inst = instrumentByToken.get(tick.providerToken);
       if (!inst) return;

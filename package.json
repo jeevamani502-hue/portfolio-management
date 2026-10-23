@@ -16,9 +16,13 @@
     "lint:safety": "node scripts/banned-phrases.mjs",
     "kite:token": "node scripts/kite-access-token.mjs",
     "restart": "node scripts/restart.mjs",
+    "restart:stable": "node scripts/restart.mjs --stable",
     "stop": "node scripts/restart.mjs --stop",
     "infra:up": "docker compose -f docker/docker-compose.yml up -d",
-    "infra:down": "docker compose -f docker/docker-compose.yml down"
+    "infra:down": "docker compose -f docker/docker-compose.yml down",
+    "oracle:create": "node scripts/create-oracle-vm.mjs",
+    "oracle:signup": "node scripts/create-oracle-account.mjs",
+    "tunnel": "npx ngrok http 4000"
   },
   "devDependencies": {
     "concurrently": "^9.1.0",

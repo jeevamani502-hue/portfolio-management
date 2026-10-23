@@ -139,6 +139,20 @@ export interface FnoDecisionInput {
   riskPercent: number;
   atrStopMultiple?: number;
   minRewardRisk?: number;
+  /**
+   * How long the position may be held. 'swing' (default) wants two or more
+   * days to expiry and allows a carry; 'intraday' is flat by the close, so
+   * only expiry day itself is refused and the time stop is today's square-off.
+   */
+  horizon?: 'swing' | 'intraday';
+  /** Make the 15-minute readings (score, supertrend, VWAP) gates. Default: on for intraday. */
+  timingGates?: boolean;
+  /** Make "a named setup has formed" a gate. Default off. */
+  namedSetupGate?: boolean;
+  /** IST minutes of day before which no fresh entry is allowed. Default 09:45 intraday, 09:30 swing. */
+  entryStartMin?: number;
+  /** Second target as a multiple of the stop distance. Default 1.5 intraday, 2.5 swing. */
+  target2R?: number;
   now?: Date;
 }
 
@@ -157,6 +171,8 @@ const RSI_EXHAUSTED_LOW = 25;
 /** Fresh entries only between these IST minutes on an open session. */
 export const ENTRY_WINDOW_START = 9 * 60 + 30;
 export const ENTRY_WINDOW_END = 15 * 60;
+/** Intraday entries wait for the first 15-minute bar to close and the hourly bar to mean something. */
+export const INTRADAY_ENTRY_START = 9 * 60 + 45;
 /** Below this many calendar days to expiry, no fresh option buys. */
 export const MIN_DAYS_TO_EXPIRY = 2;
 const IV_PERCENTILE_RICH = 80;
@@ -166,6 +182,8 @@ const VIX_HIGH = 25;
 const OUTLAY_SHARE_WARN = 0.25;
 /** Second target, as a multiple of the stop distance on the underlying. */
 const TARGET2_R = 2.5;
+/** Intraday: the move has hours, not days, so the second target sits closer. */
+const TARGET2_R_INTRADAY = 1.5;
 
 const GRADE_A_SCORE = 75;
 const GRADE_B_SCORE = 60;
@@ -200,8 +218,11 @@ export const expiryInstant = (expiry: string): Date => fromIst(expiry, 15, 30);
 export function buildFnoDecision(input: FnoDecisionInput): FnoDecision {
   const {
     underlying, chain, daily, intraday, regime, vix, ivPercentile, market,
-    capital, riskPercent, atrStopMultiple = 1.5, minRewardRisk = 1.5, now = new Date(),
+    capital, riskPercent, atrStopMultiple = 1.5, minRewardRisk = 1.5, now = new Date(), horizon = 'swing',
+    timingGates, namedSetupGate = false, entryStartMin, target2R,
   } = input;
+  const intradayHorizon = horizon === 'intraday';
+  const timingGate = timingGates ?? intradayHorizon;
 
   const factors: DecisionFactor[] = [];
   const add = (f: Omit<DecisionFactor, 'gate'> & { gate?: boolean }) =>
@@ -253,7 +274,10 @@ export function buildFnoDecision(input: FnoDecisionInput): FnoDecision {
     ) ?? daily.report.setups.find((s) => s.direction === bias && s.strength >= 50);
     add({
       id: 'setup_present', label: 'A named setup has formed in that direction',
-      group: 'direction', weight: 2,
+      // Weighted, not a gate: the pattern detector rarely names a setup on hourly
+      // index bars inside a steady trend, and making it mandatory blocked clean
+      // entries on 21–22 Oct 2026 that scored 84–88 with every timing reading agreeing.
+      group: 'direction', weight: 2, gate: namedSetupGate,
       verdict: bias === 'NEUTRAL' ? 'na' : match ? 'pass' : 'fail',
       observed: match
         ? `${match.label} at ${match.strength}/100 confirmation`
@@ -305,7 +329,9 @@ export function buildFnoDecision(input: FnoDecisionInput): FnoDecision {
       && (bull ? intradayScore >= INTRADAY_AGREE_BULL : intradayScore <= INTRADAY_AGREE_BEAR);
     add({
       id: 'intraday_agrees', label: 'Lower timeframe agrees',
-      group: 'timing', weight: 2.5,
+      // Intraday: a gate. Entering while the timing chart disagrees is how a
+      // position gets closed by the direction guard a minute after it opens.
+      group: 'timing', weight: 2.5, gate: timingGate,
       verdict: intradayScore === null || bias === 'NEUTRAL' ? 'na' : agrees ? 'pass' : 'fail',
       observed: intraday === null
         ? 'No intraday history available to time the entry'
@@ -321,7 +347,7 @@ export function buildFnoDecision(input: FnoDecisionInput): FnoDecision {
     const onSide = v !== null && close !== null && (bull ? close > v : close < v);
     add({
       id: 'vwap_side', label: `Price is ${bull ? 'above' : 'below'} session VWAP`,
-      group: 'timing', weight: 2,
+      group: 'timing', weight: 2, gate: timingGate,
       verdict: v === null || close === null || bias === 'NEUTRAL' ? 'na' : onSide ? 'pass' : 'fail',
       observed: v === null || close === null
         ? 'Session VWAP unavailable'
@@ -334,7 +360,7 @@ export function buildFnoDecision(input: FnoDecisionInput): FnoDecision {
     const agrees = dir !== null && (bull ? dir === 1 : dir === -1);
     add({
       id: 'intraday_trend_filter', label: 'Intraday trend filter agrees',
-      group: 'timing', weight: 1.5,
+      group: 'timing', weight: 1.5, gate: timingGate,
       verdict: dir === null || bias === 'NEUTRAL' ? 'na' : agrees ? 'pass' : 'fail',
       observed: dir === null
         ? 'Intraday Supertrend unavailable'
@@ -358,17 +384,22 @@ export function buildFnoDecision(input: FnoDecisionInput): FnoDecision {
   }
 
   const sessionOpen = market.phase === 'OPEN';
+  // Intraday reads the hourly chart for direction: at 09:35 that bar is five
+  // minutes old and the first 15-minute bar has not closed. Wait for 09:45.
+  const windowStart = entryStartMin ?? (intradayHorizon ? INTRADAY_ENTRY_START : ENTRY_WINDOW_START);
+  const windowStartLabel = `${String(Math.floor(windowStart / 60)).padStart(2, '0')}:${String(windowStart % 60).padStart(2, '0')}`;
   const entryWindowOpen =
-    sessionOpen && market.minutesOfDay >= ENTRY_WINDOW_START && market.minutesOfDay <= ENTRY_WINDOW_END;
+    sessionOpen && market.minutesOfDay >= windowStart && market.minutesOfDay <= ENTRY_WINDOW_END;
   let sessionNote: string;
   if (!sessionOpen) {
     sessionNote =
       'The market is not in a live session. The plan below is built from the last available prices; ' +
       're-check it after 09:30 IST on the next trading day before acting.';
-  } else if (market.minutesOfDay < ENTRY_WINDOW_START) {
-    sessionNote =
-      'First fifteen minutes of the session — the opening range is still forming and spreads are wide. ' +
-      'No fresh entries before 09:30 IST.';
+  } else if (market.minutesOfDay < windowStart) {
+    sessionNote = intradayHorizon
+      ? `The opening range is still forming and the hourly bar that sets the direction has barely started. No intraday entries before ${windowStartLabel} IST.`
+      : 'First fifteen minutes of the session — the opening range is still forming and spreads are wide. ' +
+        'No fresh entries before 09:30 IST.';
   } else if (market.minutesOfDay > ENTRY_WINDOW_END) {
     sessionNote =
       'Last thirty minutes of the session. A fresh option buy now carries overnight theta and gap risk ' +
@@ -470,14 +501,16 @@ export function buildFnoDecision(input: FnoDecisionInput): FnoDecision {
   }
 
   {
-    const tooClose = daysToExpiry < MIN_DAYS_TO_EXPIRY;
+    // Intraday: the position is flat by the close, so only expiry day itself
+    // (gamma, and a premium that goes to its intrinsic value by 15:30) is refused.
+    const tooClose = intradayHorizon ? daysToExpiry < 1 : daysToExpiry < MIN_DAYS_TO_EXPIRY;
     add({
-      id: 'expiry_distance', label: 'Enough time to expiry for the move to play out',
+      id: 'expiry_distance', label: intradayHorizon ? 'Not expiry day' : 'Enough time to expiry for the move to play out',
       group: 'volatility', weight: 1.5, gate: true,
-      verdict: tooClose ? 'fail' : daysToExpiry <= 3 ? 'fail' : 'pass',
+      verdict: tooClose ? 'fail' : !intradayHorizon && daysToExpiry <= 3 ? 'fail' : 'pass',
       observed: daysToExpiry === 0
         ? 'Expiry day — theta and gamma dominate; no fresh option buys'
-        : `${daysToExpiry} calendar day(s) to ${chain.expiry}${daysToExpiry <= 3 && !tooClose ? ' — short; the underlying must move soon or the premium decays' : ''}`,
+        : `${daysToExpiry} calendar day(s) to ${chain.expiry}${!intradayHorizon && daysToExpiry <= 3 && !tooClose ? ' — short; the underlying must move soon or the premium decays' : intradayHorizon ? ' — fine for a same-day hold' : ''}`,
     });
   }
 
@@ -606,10 +639,11 @@ export function buildFnoDecision(input: FnoDecisionInput): FnoDecision {
     && setup.spot !== null && setup.delta !== null && setup.sizing
   ) {
     const stopDistance = Math.abs(setup.spot - setup.underlyingStop);
+    const t2r = target2R ?? (intradayHorizon ? TARGET2_R_INTRADAY : TARGET2_R);
     const target2Underlying = bull
-      ? setup.spot + stopDistance * TARGET2_R
-      : setup.spot - stopDistance * TARGET2_R;
-    const target2Premium = setup.entryPremium + stopDistance * TARGET2_R * Math.abs(setup.delta);
+      ? setup.spot + stopDistance * t2r
+      : setup.spot - stopDistance * t2r;
+    const target2Premium = setup.entryPremium + stopDistance * t2r * Math.abs(setup.delta);
     const riskPerUnit = setup.entryPremium - setup.stopPremium;
 
     // A limit inside the quoted spread; without a book, one percent either side.
@@ -617,7 +651,7 @@ export function buildFnoDecision(input: FnoDecisionInput): FnoDecision {
     const spreadPct = spreadItem ? Number.parseFloat(spreadItem.value) / 100 : 0.01;
     const half = setup.entryPremium * (Number.isFinite(spreadPct) ? spreadPct : 0.01) / 2;
 
-    const shortDated = daysToExpiry <= 3;
+    const shortDated = intradayHorizon || daysToExpiry <= 3;
     plan = {
       entryPremium: setup.entryPremium,
       entryZone: {
@@ -637,14 +671,18 @@ export function buildFnoDecision(input: FnoDecisionInput): FnoDecision {
       quantity: setup.sizing.quantity,
       premiumOutlay: setup.totalPremiumAtRisk ?? setup.entryPremium * setup.sizing.quantity,
       riskAtStop: setup.sizing.actualCapitalAtRisk,
-      timeStop: shortDated
+      timeStop: intradayHorizon
+        ? 'Intraday: flat by the square-off time today whatever the premium is doing. Nothing is carried to the next session.'
+        : shortDated
         ? 'Exit by 15:15 IST today if neither level has been hit. With this little time to expiry, a position carried overnight at a loss is mostly theta.'
         : `If ${underlying} has not moved in your favour within two sessions, exit. Theta is then paying for a view that is not playing out.`,
       exitRules: [
         `Stop: exit the whole position if the premium trades at or below ₹${setup.stopPremium.toFixed(2)}, or if ${underlying} trades through ${setup.underlyingStop.toFixed(0)} — whichever comes first. The stop on the premium is nominal; the underlying level is the real invalidation.`,
         `Target 1 at ₹${setup.targetPremium.toFixed(2)} (${underlying} ${setup.underlyingTarget.toFixed(0)}): book half and move the stop on the rest to your entry price.`,
         `Target 2 at ₹${target2Premium.toFixed(2)} (${underlying} ${target2Underlying.toFixed(0)}): close the remainder, or trail it behind the ${intraday?.snapshot.timeframe ?? '15m'} Supertrend if the move is still extending.`,
-        shortDated
+        intradayHorizon
+          ? 'Time stop: intraday — flat at the square-off time today regardless.'
+          : shortDated
           ? 'Time stop: flat by 15:15 IST today if neither level is hit.'
           : 'Time stop: flat within two sessions if the underlying has not progressed.',
         `Thesis stop: exit if the ${daily.snapshot.timeframe} rule score crosses back through 50 — the reason for the trade is gone even if the stop is not hit.`,

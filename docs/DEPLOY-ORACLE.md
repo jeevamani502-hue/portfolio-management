@@ -37,8 +37,63 @@ In the Oracle Cloud console: **Compute → Instances → Create instance**.
 | SSH keys | Upload or generate | Keep the private key safe; it is the only way in. |
 
 **If you see "Out of host capacity"** — that is normal for the ARM shape in
-busy regions, not an error on your part. Try a different availability domain,
-or retry later; capacity frees up regularly.
+busy regions, not an error on your part. Nothing in your setup is wrong; Oracle
+simply has no free ARM hosts left in that region at that moment. In order of
+how often each one works:
+
+1. **Ask for less.** On the same Create instance page, under *Image and shape*
+   press *Change shape* → *Ampere* → `VM.Standard.A1.Flex` and set **1 OCPU and
+   6 GB** instead of 2 and 12. A smaller request fits a nearly full host. The
+   app runs comfortably on this; raise it later from the instance's *Edit* menu
+   when capacity is free.
+2. **Try again at a quiet time.** Capacity is released as other people delete
+   instances. Early morning IST (05:00–08:00) and late night succeed far more
+   often than daytime. Press *Create* again with the same settings; nothing
+   needs re-entering.
+3. **Pick another availability domain**, if the region has more than one. Mumbai
+   (`ap-mumbai-1`) has only one, so this choice is missing there; Hyderabad and
+   most larger regions have three. Always Free compute only exists in your home
+   region, so you cannot switch region for this.
+4. **Upgrade the account to Pay As You Go.** Oracle gives paid-tier accounts
+   priority for capacity, and Always Free resources stay free on a Pay As You Go
+   account: you are only charged for what is outside the free allowance, so keep
+   to one A1.Flex instance within 4 OCPU / 24 GB. *Billing → Upgrade and manage
+   payment*. This is the step that most reliably ends a long run of capacity
+   errors, but it does put a card on an account that can incur charges, so
+   choose it deliberately.
+
+Do not switch to the AMD `VM.Standard.E2.1.Micro` shape to get around it. It is
+also Always Free but has 1 GB of memory, which is not enough for PostgreSQL, the
+API and the worker together.
+
+### Let a script keep trying for you
+
+Clicking *Create* by hand at the right moment is a lottery. The repo has a script
+that asks Oracle for the instance every few minutes, through the same API the
+console uses, until a host is free. It needs an API key, which takes two minutes:
+
+1. In the console click your profile icon (top right) → **My profile** →
+   **API keys** → **Add API key** → *Generate API key pair* → **Download private
+   key**, then **Add**.
+2. Save the downloaded file as `C:\Users\<you>\.oci\oci_api_key.pem`.
+3. The dialog shows a *Configuration file preview*. Copy it into
+   `C:\Users\<you>\.oci\config` and set its `key_file=` line to the path from
+   step 2.
+4. If the tenancy has no network yet: **Networking → Virtual cloud networks →
+   Start VCN Wizard → VCN with Internet Connectivity**, accept the defaults.
+   (The Create instance page normally does this for you, but only when the
+   instance is actually created.)
+
+Then, from the project root, leave this running:
+
+```bash
+node scripts/oci-retry-create.mjs --ocpus 1 --memory 6 --every 3
+```
+
+It discovers the availability domain, the Ubuntu 24.04 ARM image and your
+public subnet, retries every 3 minutes, and when the instance is granted prints
+its public IP and the next steps. Stop it with Ctrl+C. It uses the SSH key at
+`~/.ssh/advisha_oracle.pub` by default; pass `--ssh <path>` for another.
 
 ---
 

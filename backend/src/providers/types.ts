@@ -365,6 +365,12 @@ export interface TickSubscription {
   tokens: string[];
   onTick: (tick: NormalizedTick) => void;
   onStatus: (status: { connected: boolean; reason?: string }) => void;
+  /**
+   * Exchange for a provider token, when the caller already knows it (the
+   * instrument master in the database does). Saves the provider downloading
+   * its whole scrip master just to open the socket after a restart.
+   */
+  exchangeFor?: (token: string) => Exchange | undefined;
 }
 
 export interface TickStream {

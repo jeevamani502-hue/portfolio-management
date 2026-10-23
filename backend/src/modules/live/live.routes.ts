@@ -7,17 +7,19 @@ import { z } from 'zod';
 import { asyncHandler, respond, requireAuth, validate, auditLog } from '../../middleware/index.js';
 import { badRequest } from '../../utils/errors.js';
 import * as live from './live.service.js';
+import { RISK_LIMITS } from '../../config/riskLimits.js';
+import * as hero from './heroZero.service.js';
 
 export const liveRouter = Router();
 liveRouter.use(requireAuth);
 
 const configSchema = z.object({
   mode: z.enum(['OFF', 'CONFIRM', 'AUTO']).optional(),
-  riskPerTradePct: z.number().min(0.1).max(10).optional(),
+  riskPerTradePct: z.number().min(RISK_LIMITS.live.riskPerTradePct.min).max(RISK_LIMITS.live.riskPerTradePct.max).optional(),
   maxOpenPositions: z.number().int().min(1).max(10).optional(),
   maxLotsPerTrade: z.number().int().min(1).max(50).optional(),
   maxTradesPerDay: z.number().int().min(1).max(20).optional(),
-  maxDailyLossPct: z.number().min(0.1).max(25).optional(),
+  maxDailyLossPct: z.number().min(RISK_LIMITS.live.dailyLossPct.min).max(RISK_LIMITS.live.dailyLossPct.max).optional(),
   underlyings: z.array(z.string().min(1).max(20)).min(1).max(6).optional(),
   minGrade: z.enum(['A', 'B', 'C']).optional(),
   allowExpiryDay: z.boolean().optional(),
@@ -27,6 +29,27 @@ const configSchema = z.object({
   product: z.enum(['INTRADAY', 'CARRYFORWARD']).optional(),
   scaleOut: z.boolean().optional(),
   entryTimeoutSec: z.number().int().min(15).max(600).optional(),
+  heroZeroEnabled: z.boolean().optional(),
+  heroZeroBudget: z.number().min(500).max(500000).optional(),
+  heroZeroMinPremium: z.number().min(0.5).max(100).optional(),
+  heroZeroMaxPremium: z.number().min(1).max(200).optional(),
+  heroZeroMaxLots: z.number().int().min(1).max(20).optional(),
+  heroZeroMaxTradesPerDay: z.number().int().min(1).max(5).optional(),
+  heroZeroWindowStartMin: z.number().int().min(555).max(925).optional(),
+  heroZeroWindowEndMin: z.number().int().min(555).max(925).optional(),
+  heroZeroSquareOffMin: z.number().int().min(600).max(928).optional(),
+  heroZeroStopPct: z.number().min(0).max(90).optional(),
+  heroZeroTargetMultiple: z.number().min(1.5).max(10).optional(),
+  heroZeroMinAgree: z.number().int().min(3).max(7).optional(),
+  horizon: z.enum(['intraday', 'swing']).optional(),
+  directionGuard: z.boolean().optional(),
+  requireTimingAgreement: z.boolean().optional(),
+  requireNamedSetup: z.boolean().optional(),
+  reentryCooldownMin: z.number().int().min(0).max(240).optional(),
+  cutLoserAtR: z.number().min(0).max(2).optional(),
+  stopAtrMultiple: z.number().min(0.5).max(3).optional(),
+  target1R: z.number().min(0.5).max(5).optional(),
+  target2R: z.number().min(0.75).max(10).optional(),
 });
 
 liveRouter.get('/status', asyncHandler(async (req, res) => {
@@ -94,6 +117,26 @@ liveRouter.post(
   asyncHandler(async (req, res) => {
     const { underlying } = req.body as { underlying: string };
     const result = await live.executeLive(req.user!.id, underlying.toUpperCase(), 'CONFIRM');
+    if (!result.placed) throw badRequest(result.reason);
+    respond(res, result, {}, 201);
+  }),
+);
+
+/** Hero Zero: today's read on each underlying, the settings and the attempt count. */
+liveRouter.get('/hero-zero', asyncHandler(async (req, res) => {
+  const scan = await hero.heroZeroScan(req.user!.id);
+  if (!scan) throw badRequest('Live trading is not set up yet. Save your settings first.');
+  respond(res, scan);
+}));
+
+/** Place the Hero Zero order the user is looking at. CONFIRM mode. */
+liveRouter.post(
+  '/hero-zero/execute',
+  validate(z.object({ underlying: z.string().min(1).max(20) })),
+  auditLog('live.hero_zero.execute', 'live_trades'),
+  asyncHandler(async (req, res) => {
+    const { underlying } = req.body as { underlying: string };
+    const result = await hero.executeHeroZero(req.user!.id, underlying.toUpperCase(), 'CONFIRM');
     if (!result.placed) throw badRequest(result.reason);
     respond(res, result, {}, 201);
   }),

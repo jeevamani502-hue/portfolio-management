@@ -14,6 +14,9 @@ const notified = new Set<string>();
 
 const log = logger.child({ job: 'paper-sweep' });
 
+/** Exits run every tick; entries, which cost a full evaluation per underlying, every third. */
+let tick = 0;
+
 /**
  * Drive every enabled paper-trading account.
  *
@@ -22,6 +25,8 @@ const log = logger.child({ job: 'paper-sweep' });
  * reason to abandon a trade that is already on.
  */
 export async function sweepPaperTrading(): Promise<void> {
+  tick += 1;
+  const doEntries = tick % 3 === 1;
   const users = await queryRows<{ user_id: string; is_enabled: boolean }>(
     `SELECT user_id, is_enabled FROM paper_trade_config
       WHERE is_enabled = TRUE
@@ -35,9 +40,9 @@ export async function sweepPaperTrading(): Promise<void> {
   for (const u of users) {
     try {
       const exits = await runExitSweep(u.user_id);
-      const entries = u.is_enabled
+      const entries = u.is_enabled && doEntries
         ? await runEntrySweep(u.user_id)
-        : { considered: 0, opened: 0, skipped: ['disabled'] };
+        : { considered: 0, opened: 0, skipped: [u.is_enabled ? 'entries run every third minute' : 'disabled'] };
 
       if (exits.closed > 0 || entries.opened > 0) {
         log.info(

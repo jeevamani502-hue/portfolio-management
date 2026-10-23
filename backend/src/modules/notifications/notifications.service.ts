@@ -10,8 +10,9 @@
 import { query, queryRows, queryOne } from '../../db/pool.js';
 import { logger } from '../../utils/logger.js';
 import { pushToUser } from '../../websocket/server.js';
+import { dispatchExternal } from './channels.service.js';
 
-export type NotificationKind = 'alert' | 'fno_entry' | 'fno_exit' | 'paper_advice' | 'live' | 'system';
+export type NotificationKind = 'alert' | 'fno_entry' | 'fno_exit' | 'paper' | 'paper_advice' | 'live' | 'system';
 export type NotificationSeverity = 'info' | 'action' | 'warning';
 
 export interface NotificationInput {
@@ -82,6 +83,8 @@ export async function notify(
 
   const sessions = pushToUser(userId, { op: 'notification', notification });
   log.info({ userId, kind: n.kind, severity: notification.severity, sessions, title: n.title }, 'Notification');
+  // Phone channels, best effort, after the row is safely written.
+  void dispatchExternal(userId, notification).catch((err) => log.warn({ userId, err }, 'External dispatch failed'));
   return { notification, sessions };
 }
 

@@ -8,6 +8,7 @@
  */
 import { Router } from 'express';
 import { z } from 'zod';
+import { RISK_LIMITS } from '../../config/riskLimits.js';
 import {
   asyncHandler, respond, requireAuth, validate, auditLog, timeframeSchema,
 } from '../../middleware/index.js';
@@ -54,7 +55,7 @@ const PARAM_SCHEMAS: Record<string, z.ZodTypeAny> = {
   FNO_SETUP: z.object({
     underlying: z.string().min(1).max(20).default('NIFTY'),
     capital: z.number().positive('capital is required to size the position'),
-    riskPercent: z.number().min(0.1).max(10).default(1),
+    riskPercent: z.number().min(RISK_LIMITS.fno.riskPercent.min).max(RISK_LIMITS.fno.riskPercent.max).default(1),
     minConfirmation: z.number().min(0).max(100).default(50),
     minGrade: z.enum(['A', 'B', 'C']).default('B'),
   }),
@@ -62,7 +63,7 @@ const PARAM_SCHEMAS: Record<string, z.ZodTypeAny> = {
   NEWS_FNO: z.object({
     underlying: z.string().min(1).max(20).default('NIFTY'),
     capital: z.number().positive('capital is required to size the position'),
-    riskPercent: z.number().min(0.1).max(10).default(1),
+    riskPercent: z.number().min(RISK_LIMITS.fno.riskPercent.min).max(RISK_LIMITS.fno.riskPercent.max).default(1),
     minConfirmation: z.number().min(0).max(100).default(50),
     minGrade: z.enum(['A', 'B', 'C']).default('B'),
     /** How strongly the article must be tied to the underlying, 0-1. */

@@ -11,6 +11,7 @@
  * their own honest status chip.
  */
 import { create } from 'zustand';
+import { wsBase } from '@/lib/server';
 import { getAccessToken } from '@/services/api';
 import { useNotifications } from '@/store/notifications';
 import type { NotificationDto } from '@/types/api';
@@ -46,7 +47,8 @@ interface TickStore {
 // socket from an https:// document, and behind a TLS-terminating tunnel
 // (ngrok, Cloudflare) the page is https even though the dev server is not.
 const WS_SCHEME = window.location.protocol === 'https:' ? 'wss' : 'ws';
-const WS_URL = import.meta.env['VITE_WS_URL'] ?? `${WS_SCHEME}://${window.location.host}/ws`;
+const wsUrl = (): string =>
+  wsBase() ?? import.meta.env['VITE_WS_URL'] ?? `${WS_SCHEME}://${window.location.host}/ws`;
 
 let socket: WebSocket | null = null;
 let reconnectAttempt = 0;
@@ -113,7 +115,7 @@ export function connect(): void {
   intentionallyClosed = false;
   useTicks.setState({ feedState: 'connecting', feedReason: null });
 
-  const url = `${WS_URL}?token=${encodeURIComponent(token)}`;
+  const url = `${wsUrl()}?token=${encodeURIComponent(token)}`;
   let ws: WebSocket;
   try {
     ws = new WebSocket(url);

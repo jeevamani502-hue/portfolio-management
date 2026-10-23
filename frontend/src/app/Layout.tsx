@@ -8,7 +8,7 @@ import { useQuery } from '@tanstack/react-query';
 import {
   LayoutDashboard, TrendingUp, LineChart, Layers, Radar, Briefcase, Eye,
   Newspaper, Bell, FlaskConical,
-  ClipboardList, Zap, Bot, Settings as SettingsIcon, LogOut,
+  ClipboardList, Zap, Bot, Settings as SettingsIcon, LogOut, Receipt, ShieldCheck,
   Menu, X, Search, Sun, Moon, Wifi, WifiOff,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
@@ -33,9 +33,11 @@ const NAV = [
   { to: '/alerts', label: 'Alerts', icon: Bell },
   { to: '/paper', label: 'Paper Trading', icon: ClipboardList },
   { to: '/live', label: 'Live Trading', icon: Zap },
+  { to: '/reports', label: 'Reports', icon: Receipt },
   { to: '/backtest', label: 'Backtesting', icon: FlaskConical },
   { to: '/analyst', label: 'AI Analyst', icon: Bot },
   { to: '/settings', label: 'Settings', icon: SettingsIcon },
+  { to: '/admin', label: 'Admin', icon: ShieldCheck, adminOnly: true },
 ] as const;
 
 function useTheme() {
@@ -190,7 +192,7 @@ export function Layout() {
         </div>
 
         <nav className="flex-1 space-y-0.5 overflow-y-auto p-2">
-          {NAV.map((item) => (
+          {NAV.filter((n) => !('adminOnly' in n && n.adminOnly) || user?.role === 'admin').map((item) => (
             <NavLink
               key={item.to}
               to={item.to}

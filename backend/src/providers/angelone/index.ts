@@ -173,7 +173,7 @@ export class AngelOneProvider extends HttpProvider implements MarketDataProvider
         help: 'The base32 secret shown when you enable TOTP. Lets the server refresh the session without a manual login.',
       },
     ],
-    throttleMs: { default: 350, quote: 400, historical: 400, login: 2_000, instruments: 3600_000 },
+    throttleMs: { default: 350, quote: 400, historical: 1100, login: 2_000, instruments: 3600_000 },
     notes:
       'Free to use with an Angel One account, live data and historical candles included. ' +
       'Sessions are refreshed automatically via TOTP, so there is no daily login step. ' +
@@ -501,13 +501,20 @@ export class AngelOneProvider extends HttpProvider implements MarketDataProvider
       );
     }
 
-    // Resolving a token back to its exchange needs the contract master,
-    // which is cached after the first sync.
-    const rows = this.scripCache?.rows ?? (await this.getInstruments());
-    const exchangeByToken = new Map<string, Exchange>();
-    for (const r of rows) {
-      if (r.providerToken) exchangeByToken.set(r.providerToken, r.exchange);
+    // Resolving a token back to its exchange needs the contract master. The
+    // caller usually knows it already (the ingest reads it from the database);
+    // only without that do we fall back to the scrip master, which is a
+    // 100 MB download and was the reason the feed took over a minute to come
+    // back after every restart.
+    let exchangeByToken: Map<string, Exchange> | null = null;
+    if (!sub.exchangeFor) {
+      const rows = this.scripCache?.rows ?? (await this.getInstruments());
+      exchangeByToken = new Map<string, Exchange>();
+      for (const r of rows) {
+        if (r.providerToken) exchangeByToken.set(r.providerToken, r.exchange);
+      }
     }
+    const exchangeFor = sub.exchangeFor ?? ((token: string) => exchangeByToken?.get(token));
 
     const stream = new AngelOneTickStream(
       {
@@ -517,7 +524,7 @@ export class AngelOneProvider extends HttpProvider implements MarketDataProvider
         clientCode: this.clientCode!,
       },
       sub,
-      (token) => exchangeByToken.get(token),
+      exchangeFor,
     );
     await stream.open();
     if (sub.tokens.length > 0) await stream.subscribe(sub.tokens);

@@ -304,10 +304,14 @@ async function evaluateFnoSetup(alert: AlertRow): Promise<Evaluation> {
   }
 
   const registry = await registryForUser(alert.user_id);
+  // A 5m, 15m or 1h alert is an intraday read: hourly bias, timing on the
+  // alert's own bars (15m when it says 1h), flat by the close. 1d is swing.
+  const intraday = alert.timeframe !== '1d';
   const evaluation = await evaluateUnderlying(registry, underlying, {
     capital,
     riskPercent,
-    biasTimeframe: alert.timeframe === '1h' ? '1h' : '1d',
+    horizon: intraday ? 'intraday' : 'swing',
+    ...(alert.timeframe === '5m' || alert.timeframe === '15m' ? { entryTimeframe: alert.timeframe } : {}),
     record: { userId: alert.user_id, origin: 'alert' },
   });
 

@@ -1,0 +1,254 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Deploying to Oracle Cloud Always Free</title>
+<style>
+  :root{color-scheme:light dark;--fg:#1f2328;--bg:#ffffff;--muted:#59636e;--line:#d1d9e0;--code:#f6f8fa;--accent:#0969da;--star:#9a6700}
+  @media (prefers-color-scheme:dark){:root{--fg:#e6edf3;--bg:#0d1117;--muted:#9198a1;--line:#30363d;--code:#161b22;--accent:#4493f8;--star:#d29922}}
+  body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.6 -apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+  main{max-width:1000px;margin:0 auto;padding:32px 20px 64px}
+  h1{font-size:28px;margin:0 0 8px;border-bottom:1px solid var(--line);padding-bottom:10px}
+  h2{font-size:21px;margin:36px 0 12px;border-bottom:1px solid var(--line);padding-bottom:6px}
+  h3{font-size:17px;margin:24px 0 8px}
+  p{margin:0 0 12px}
+  a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}
+  table{border-collapse:collapse;width:100%;margin:12px 0 20px;font-size:14px}
+  th,td{border:1px solid var(--line);padding:8px 10px;vertical-align:top;text-align:left}
+  th{background:var(--code)}
+  td:first-child{white-space:nowrap;width:1%}
+  tr:has(td:first-child strong){background:color-mix(in srgb,var(--star) 8%,transparent)}
+  code{font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;background:var(--code);padding:1px 5px;border-radius:4px}
+  pre{background:var(--code);border:1px solid var(--line);border-radius:6px;padding:12px 14px;overflow-x:auto}
+  pre code{background:none;padding:0}
+  hr{border:0;border-top:1px solid var(--line);margin:28px 0}
+  .note{color:var(--muted);font-size:13px;margin-top:40px;border-top:1px solid var(--line);padding-top:12px}
+</style>
+</head>
+<body>
+<main>
+<h1>Deploying to Oracle Cloud Always Free</h1>
+<p>Oracle&#39;s Always Free tier is the only free option that keeps a process
+running permanently. Everywhere else, a free web service sleeps after a few
+minutes idle — and when it sleeps the background worker stops, which means no
+scanner sweeps, no news polling, no alert evaluation and no paper-trade
+exits. That is most of what this platform does, so a real VM is the only free
+arrangement where it behaves as designed.</p>
+<p>This runs the whole stack — API, worker, PostgreSQL, Redis and HTTPS — on one
+machine, at no cost, indefinitely.</p>
+<hr>
+<h2>Before you start</h2>
+<p>You need a card for identity verification. Oracle does not charge it for
+Always Free resources, but the account cannot be created without one.</p>
+<p>You also need a hostname. A bare IP cannot have a Let&#39;s Encrypt certificate,
+and the login page guards your broker credentials, so plain HTTP is not an
+acceptable fallback. A free <a href="https://www.duckdns.org">DuckDNS</a> subdomain is
+fine — <code>yourname.duckdns.org</code> costs nothing and takes two minutes.</p>
+<hr>
+<h2>1. Create the instance</h2>
+<p>In the Oracle Cloud console: <strong>Compute → Instances → Create instance</strong>.</p>
+<table>
+<thead>
+<tr>
+<th>Setting</th>
+<th>Value</th>
+<th>Why</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Shape</td>
+<td><strong>VM.Standard.A1.Flex</strong> (Ampere ARM)</td>
+<td>The Always Free ARM allowance is 4 OCPU / 24 GB. The AMD micro shapes are far smaller.</td>
+</tr>
+<tr>
+<td>OCPUs / memory</td>
+<td>2 OCPU, 12 GB</td>
+<td>Comfortable, and leaves headroom inside the free allowance.</td>
+</tr>
+<tr>
+<td>Image</td>
+<td>Ubuntu 22.04 or 24.04</td>
+<td>Any modern Linux works; these are what the commands below assume.</td>
+</tr>
+<tr>
+<td>Boot volume</td>
+<td>50 GB</td>
+<td>Always Free includes 200 GB total.</td>
+</tr>
+<tr>
+<td>SSH keys</td>
+<td>Upload or generate</td>
+<td>Keep the private key safe; it is the only way in.</td>
+</tr>
+</tbody></table>
+<p><strong>If you see &quot;Out of host capacity&quot;</strong> — that is normal for the ARM shape in
+busy regions, not an error on your part. Nothing in your setup is wrong; Oracle
+simply has no free ARM hosts left in that region at that moment. In order of
+how often each one works:</p>
+<ol>
+<li><strong>Ask for less.</strong> On the same Create instance page, under <em>Image and shape</em>
+press <em>Change shape</em> → <em>Ampere</em> → <code>VM.Standard.A1.Flex</code> and set <strong>1 OCPU and
+6 GB</strong> instead of 2 and 12. A smaller request fits a nearly full host. The
+app runs comfortably on this; raise it later from the instance&#39;s <em>Edit</em> menu
+when capacity is free.</li>
+<li><strong>Try again at a quiet time.</strong> Capacity is released as other people delete
+instances. Early morning IST (05:00–08:00) and late night succeed far more
+often than daytime. Press <em>Create</em> again with the same settings; nothing
+needs re-entering.</li>
+<li><strong>Pick another availability domain</strong>, if the region has more than one. Mumbai
+(<code>ap-mumbai-1</code>) has only one, so this choice is missing there; Hyderabad and
+most larger regions have three. Always Free compute only exists in your home
+region, so you cannot switch region for this.</li>
+<li><strong>Upgrade the account to Pay As You Go.</strong> Oracle gives paid-tier accounts
+priority for capacity, and Always Free resources stay free on a Pay As You Go
+account: you are only charged for what is outside the free allowance, so keep
+to one A1.Flex instance within 4 OCPU / 24 GB. <em>Billing → Upgrade and manage
+payment</em>. This is the step that most reliably ends a long run of capacity
+errors, but it does put a card on an account that can incur charges, so
+choose it deliberately.</li>
+</ol>
+<p>Do not switch to the AMD <code>VM.Standard.E2.1.Micro</code> shape to get around it. It is
+also Always Free but has 1 GB of memory, which is not enough for PostgreSQL, the
+API and the worker together.</p>
+<h3>Let a script keep trying for you</h3>
+<p>Clicking <em>Create</em> by hand at the right moment is a lottery. The repo has a script
+that asks Oracle for the instance every few minutes, through the same API the
+console uses, until a host is free. It needs an API key, which takes two minutes:</p>
+<ol>
+<li>In the console click your profile icon (top right) → <strong>My profile</strong> →
+<strong>API keys</strong> → <strong>Add API key</strong> → <em>Generate API key pair</em> → <strong>Download private
+key</strong>, then <strong>Add</strong>.</li>
+<li>Save the downloaded file as <code>C:\Users\&lt;you&gt;\.oci\oci_api_key.pem</code>.</li>
+<li>The dialog shows a <em>Configuration file preview</em>. Copy it into
+<code>C:\Users\&lt;you&gt;\.oci\config</code> and set its <code>key_file=</code> line to the path from
+step 2.</li>
+<li>If the tenancy has no network yet: <strong>Networking → Virtual cloud networks →
+Start VCN Wizard → VCN with Internet Connectivity</strong>, accept the defaults.
+(The Create instance page normally does this for you, but only when the
+instance is actually created.)</li>
+</ol>
+<p>Then, from the project root, leave this running:</p>
+<pre><code class="language-bash">node scripts/oci-retry-create.mjs --ocpus 1 --memory 6 --every 3
+</code></pre>
+<p>It discovers the availability domain, the Ubuntu 24.04 ARM image and your
+public subnet, retries every 3 minutes, and when the instance is granted prints
+its public IP and the next steps. Stop it with Ctrl+C. It uses the SSH key at
+<code>~/.ssh/advisha_oracle.pub</code> by default; pass <code>--ssh &lt;path&gt;</code> for another.</p>
+<hr>
+<h2>2. Open the ports</h2>
+<p>Two places have to agree, and forgetting the second is the usual reason a
+deployment appears dead.</p>
+<p><strong>Oracle&#39;s virtual firewall</strong> — VCN → your subnet → Security List → add
+ingress rules for TCP <strong>80</strong> and <strong>443</strong> from <code>0.0.0.0/0</code>.</p>
+<p><strong>The VM&#39;s own firewall</strong> — Ubuntu images ship with iptables rules that drop
+everything else:</p>
+<pre><code class="language-bash">sudo iptables -I INPUT 6 -m state --state NEW -p tcp --dport 80 -j ACCEPT
+sudo iptables -I INPUT 6 -m state --state NEW -p tcp --dport 443 -j ACCEPT
+sudo netfilter-persistent save
+</code></pre>
+<p>Do <strong>not</strong> open 5432 or 6379. The compose file keeps PostgreSQL and Redis on
+the internal network, reachable only by the app containers. A database
+exposed to the internet is found by scanners within hours.</p>
+<hr>
+<h2>3. Point the hostname at the VM</h2>
+<p>Set your DuckDNS (or other) record to the instance&#39;s public IP. Confirm it
+has propagated before continuing, because Caddy&#39;s certificate request will
+fail if the name does not yet resolve:</p>
+<pre><code class="language-bash">dig +short yourname.duckdns.org
+</code></pre>
+<hr>
+<h2>4. Install Docker</h2>
+<pre><code class="language-bash">sudo apt-get update &amp;&amp; sudo apt-get install -y ca-certificates curl git
+sudo install -m 0755 -d /etc/apt/keyrings
+sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+sudo chmod a+r /etc/apt/keyrings/docker.asc
+echo &quot;deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] \
+  https://download.docker.com/linux/ubuntu $(. /etc/os-release &amp;&amp; echo $VERSION_CODENAME) stable&quot; \
+  | sudo tee /etc/apt/sources.list.d/docker.list &gt; /dev/null
+sudo apt-get update
+sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+
+# So you can run docker without sudo. Log out and back in afterwards.
+sudo usermod -aG docker $USER
+</code></pre>
+<hr>
+<h2>5. Get the code and write the secrets</h2>
+<pre><code class="language-bash">git clone https://github.com/jeevamani502-hue/portfolio-management.git
+cd portfolio-management
+cp .env.prod.example .env.prod
+</code></pre>
+<p>Generate each secret <strong>on the server</strong> and paste it in:</p>
+<pre><code class="language-bash">openssl rand -base64 32   # POSTGRES_PASSWORD
+openssl rand -base64 32   # JWT_ACCESS_SECRET
+openssl rand -base64 32   # JWT_REFRESH_SECRET
+openssl rand -base64 32   # CREDENTIAL_ENC_KEY
+</code></pre>
+<p>Set <code>DOMAIN</code> to your hostname and <code>ACME_EMAIL</code> to a real address — Let&#39;s
+Encrypt uses it for expiry warnings.</p>
+<blockquote>
+<p><strong><code>CREDENTIAL_ENC_KEY</code> is the one to be careful with.</strong> It encrypts your
+broker credentials. Change it and every saved credential becomes
+undecryptable and has to be entered again. Back it up somewhere safe.</p>
+</blockquote>
+<p>Broker credentials themselves do <strong>not</strong> go in this file. Enter them in the
+running app, where they are encrypted at rest.</p>
+<hr>
+<h2>6. Start it</h2>
+<pre><code class="language-bash">docker compose -f docker-compose.prod.yml --env-file .env.prod up -d --build
+</code></pre>
+<p>The first build takes several minutes on ARM. Then apply the schema:</p>
+<pre><code class="language-bash">docker compose -f docker-compose.prod.yml --env-file .env.prod \
+  exec app node dist/db/migrate.js up
+
+docker compose -f docker-compose.prod.yml --env-file .env.prod \
+  exec app node dist/db/seed.js
+</code></pre>
+<p>Check it:</p>
+<pre><code class="language-bash">curl -s https://yourname.duckdns.org/health
+docker compose -f docker-compose.prod.yml --env-file .env.prod ps
+</code></pre>
+<p><code>/health</code> reports database and Redis reachability, not merely that the
+process is alive — so an <code>ok</code> from it means the stack is genuinely wired up.</p>
+<hr>
+<h2>7. First run in the browser</h2>
+<ol>
+<li>Open <code>https://yourname.duckdns.org</code> and create your account. <strong>Use a long,
+unique password</strong> — this login stands between the internet and an
+application holding your brokerage credentials.</li>
+<li><strong>Settings → Market data providers</strong> → enter your Angel One API key,
+client code, MPIN and TOTP secret.</li>
+<li>The worker syncs the instrument master on boot; give it a few minutes.</li>
+</ol>
+<hr>
+<h2>Running it</h2>
+<pre><code class="language-bash"># Logs
+docker compose -f docker-compose.prod.yml --env-file .env.prod logs -f app
+docker compose -f docker-compose.prod.yml --env-file .env.prod logs -f worker
+
+# Update to the latest code
+git pull
+docker compose -f docker-compose.prod.yml --env-file .env.prod up -d --build
+docker compose -f docker-compose.prod.yml --env-file .env.prod exec app node dist/db/migrate.js up
+
+# Back up the database. Worth doing before any upgrade: it holds your
+# encrypted broker credentials and your paper-trading history.
+docker compose -f docker-compose.prod.yml --env-file .env.prod \
+  exec -T postgres pg_dump -U market market_ai | gzip &gt; backup-$(date +%F).sql.gz
+</code></pre>
+<hr>
+<h2>What this costs and what it does not</h2>
+<p>Nothing, indefinitely, within the Always Free allowance: 4 ARM OCPUs, 24 GB
+RAM, 200 GB storage, 10 TB egress a month. This stack uses a fraction of it.</p>
+<p>Oracle reclaims <strong>idle</strong> Always Free compute instances, but &quot;idle&quot; means
+almost no CPU or network for a week. A worker polling the market all day is
+nowhere near that threshold.</p>
+<p>What it does not buy you: market data. Angel One&#39;s free tier still supplies
+the prices, and the SEBI algo rules still apply to automated order placement.
+Hosting changes where the app runs, not what it is allowed to do.</p>
+
+
+<p class="note">Generated from <code>docs/DEPLOY-ORACLE.md</code> by <code>scripts/build-db-doc.mjs</code>. Edit the Markdown and rebuild rather than editing this file.</p>
+</main>
+</body>
+</html>

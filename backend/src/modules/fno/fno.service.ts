@@ -33,6 +33,9 @@ import {
 
 const log = logger.child({ module: 'fno' });
 
+/** Intraday first target: one risk unit. A 1.5R target inside a single session was rarely reached. */
+const INTRADAY_MIN_RR = 1.0;
+
 export type SignalOrigin = 'alert' | 'paper' | 'manual' | 'live';
 
 export interface EvaluateOptions {
@@ -46,6 +49,16 @@ export interface EvaluateOptions {
   entryTimeframe?: '5m' | '15m' | '1h';
   atrStopMultiple?: number;
   minRewardRisk?: number;
+  /**
+   * 'intraday': flat by the close. The bias comes from the hourly chart, the
+   * entry from the 15-minute one, and the nearest non-expiring weekly is
+   * acceptable. Default 'swing': daily bias, 15m entry, two or more days to expiry.
+   */
+  horizon?: 'swing' | 'intraday';
+  timingGates?: boolean;
+  namedSetupGate?: boolean;
+  entryStartMin?: number;
+  target2R?: number;
   /** Write an ENTER-grade decision to the journal under this origin. */
   record?: { userId: string; origin: SignalOrigin } | null;
 }
@@ -67,9 +80,9 @@ export interface FnoEvaluation {
  * option buyer should not be in; a trader rolls to the next week. When no
  * expiry qualifies the nearest is returned and the engine's own gate says why.
  */
-export function pickExpiry(expiries: readonly string[], now: Date): string | null {
+export function pickExpiry(expiries: readonly string[], now: Date, minDays: number = MIN_DAYS_TO_EXPIRY): string | null {
   if (expiries.length === 0) return null;
-  const usable = expiries.find((e) => calendarDaysToExpiry(e, now) >= MIN_DAYS_TO_EXPIRY);
+  const usable = expiries.find((e) => calendarDaysToExpiry(e, now) >= minDays);
   return usable ?? expiries[0]!;
 }
 
@@ -116,7 +129,7 @@ export async function evaluateUnderlying(
         undefined, 'rule_signal',
       ));
     }
-    expiry = pickExpiry(expiries.value, now);
+    expiry = pickExpiry(expiries.value, now, opts.horizon === 'intraday' ? 1 : MIN_DAYS_TO_EXPIRY);
   }
   if (!expiry) return fail(unavailable('no_expiries', `No expiry available for ${sym}.`, undefined, 'rule_signal'));
 
@@ -135,7 +148,7 @@ export async function evaluateUnderlying(
     ), expiry);
   }
 
-  const biasTf: Timeframe = opts.biasTimeframe ?? '1d';
+  const biasTf: Timeframe = opts.biasTimeframe ?? (opts.horizon === 'intraday' ? '1h' : '1d');
   const entryTf: Timeframe = opts.entryTimeframe ?? '15m';
   const [daily, intraday] = await Promise.all([
     timeframeView(registry, instrument, biasTf, 300),
@@ -172,8 +185,15 @@ export async function evaluateUnderlying(
     market: { phase: status.phase, minutesOfDay: toIst(now).minutesOfDay },
     capital: opts.capital,
     riskPercent: opts.riskPercent,
-    ...(opts.atrStopMultiple !== undefined ? { atrStopMultiple: opts.atrStopMultiple } : {}),
-    ...(opts.minRewardRisk !== undefined ? { minRewardRisk: opts.minRewardRisk } : {}),
+    // Intraday: one hourly range, not one and a half. The direction guard is the
+    // real exit; the premium stop mostly decides how many lots the risk allows.
+    atrStopMultiple: opts.atrStopMultiple ?? (opts.horizon === 'intraday' ? 1.0 : 1.5),
+    minRewardRisk: opts.minRewardRisk ?? (opts.horizon === 'intraday' ? INTRADAY_MIN_RR : 1.5),
+    ...(opts.horizon ? { horizon: opts.horizon } : {}),
+    ...(opts.timingGates !== undefined ? { timingGates: opts.timingGates } : {}),
+    ...(opts.namedSetupGate !== undefined ? { namedSetupGate: opts.namedSetupGate } : {}),
+    ...(opts.entryStartMin !== undefined ? { entryStartMin: opts.entryStartMin } : {}),
+    ...(opts.target2R !== undefined ? { target2R: opts.target2R } : {}),
     now,
   });
 
@@ -188,6 +208,7 @@ export async function evaluateUnderlying(
       const rec = await recordSignal(
         opts.record.userId, opts.record.origin, decision, chain.source, chain.asOf,
         registry.candidates('quote').map((p) => p.manifest.id),
+        { horizon: opts.horizon ?? 'swing', timeframe: biasTf },
       );
       signalId = rec.id;
       isNewSignal = rec.isNew;
@@ -233,6 +254,7 @@ async function recordSignal(
   dataAsOf: string,
   /** Provider order the tracker will quote with, so the row it links can be priced. */
   prefer: readonly string[],
+  held: { horizon: 'intraday' | 'swing'; timeframe: Timeframe },
 ): Promise<{ id: number; isNew: boolean }> {
   const plan = d.plan!;
   const strike = d.setup.strike!;
@@ -244,18 +266,18 @@ async function recordSignal(
        (user_id, underlying, expiry, strike, option_type, instrument_id, tradingsymbol,
         action, grade, score, timeframe, spot, entry_premium, stop_premium, target1_premium,
         target2_premium, underlying_stop, underlying_target1, underlying_target2,
-        factors, plan, source, data_as_of, origin)
+        factors, plan, source, data_as_of, origin, horizon)
      VALUES ($1,$2,$3::date,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,
-             $20::jsonb,$21::jsonb,$22,$23,$24)
+             $20::jsonb,$21::jsonb,$22,$23,$24,$25)
      ON CONFLICT (user_id, underlying, expiry, strike, option_type) WHERE status = 'ACTIVE'
      DO NOTHING
      RETURNING id`,
     [
       userId, d.underlying, d.expiry, strike, optionType, contract?.id ?? null,
-      contract?.tradingsymbol ?? null, d.action, d.grade, d.score, '1d', plan.underlyingEntry,
+      contract?.tradingsymbol ?? null, d.action, d.grade, d.score, held.timeframe, plan.underlyingEntry,
       plan.entryPremium, plan.stopPremium, plan.target1Premium, plan.target2Premium,
       plan.underlyingStop, plan.underlyingTarget1, plan.underlyingTarget2,
-      JSON.stringify(d.factors), JSON.stringify(plan), source, dataAsOf, origin,
+      JSON.stringify(d.factors), JSON.stringify(plan), source, dataAsOf, origin, held.horizon,
     ],
   );
   if (inserted) {
@@ -298,6 +320,8 @@ export interface SignalView {
   rMultiple: number | null;
   notes: string | null;
   generatedAt: string;
+  horizon: 'intraday' | 'swing';
+  timeframe: string;
   lastCheckedAt: string | null;
   resolvedAt: string | null;
   source: string;
@@ -312,7 +336,9 @@ interface SignalRow {
   underlying_target1: string; underlying_target2: string | null; origin: SignalOrigin;
   status: SignalStatus; last_premium: string | null; max_favourable_premium: string | null;
   max_adverse_premium: string | null; r_multiple: string | null; notes: string | null;
-  generated_at: Date; last_checked_at: Date | null; resolved_at: Date | null;
+  generated_at: Date;
+  horizon: 'intraday' | 'swing';
+  timeframe: string; last_checked_at: Date | null; resolved_at: Date | null;
   source: string; data_as_of: Date;
 }
 
@@ -344,6 +370,8 @@ const toView = (r: SignalRow): SignalView => ({
   rMultiple: num(r.r_multiple),
   notes: r.notes,
   generatedAt: r.generated_at.toISOString(),
+  horizon: r.horizon,
+  timeframe: r.timeframe,
   lastCheckedAt: r.last_checked_at?.toISOString() ?? null,
   resolvedAt: r.resolved_at?.toISOString() ?? null,
   source: r.source,
@@ -354,7 +382,7 @@ const SIGNAL_SELECT = `
   id, underlying, to_char(expiry, 'YYYY-MM-DD') AS expiry, strike, option_type, tradingsymbol,
   action, grade, score, spot, entry_premium, stop_premium, target1_premium, target2_premium,
   underlying_stop, underlying_target1, underlying_target2, origin, status, last_premium,
-  max_favourable_premium, max_adverse_premium, r_multiple, notes, generated_at,
+  max_favourable_premium, max_adverse_premium, r_multiple, notes, generated_at, horizon, timeframe,
   last_checked_at, resolved_at, source, data_as_of`;
 
 export async function listSignals(

@@ -1,7 +1,8 @@
 import { useState, useEffect } from 'react';
-import { Navigate, useLocation } from 'react-router-dom';
+import { Navigate, useLocation, Link } from 'react-router-dom';
 import { LineChart } from 'lucide-react';
 import { useAuth } from '@/store/auth';
+import { getServerBase, setServerBase, isNativeApp } from '@/lib/server';
 import { Button, Input, Label, Card, CardContent, Alert, Spinner } from '@/components/ui';
 
 export function Login() {
@@ -9,6 +10,8 @@ export function Login() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [fullName, setFullName] = useState('');
+  const [server, setServer] = useState(getServerBase());
+  const [serverOpen, setServerOpen] = useState(isNativeApp() && !getServerBase());
 
   const user = useAuth((s) => s.user);
   const initialised = useAuth((s) => s.initialised);
@@ -50,6 +53,28 @@ export function Login() {
             Indian market research, analytics and portfolio intelligence
           </p>
         </div>
+
+        {(isNativeApp() || getServerBase()) && (
+          <Card>
+            <CardContent className="space-y-2 pt-4">
+              <button type="button" className="flex w-full items-center justify-between text-left text-sm" onClick={() => setServerOpen((o) => !o)}>
+                <span className="font-medium">Server</span>
+                <span className="font-mono text-2xs text-muted-foreground">{getServerBase() || 'not set'}</span>
+              </button>
+              {serverOpen && (
+                <div className="space-y-2">
+                  <p className="text-2xs text-muted-foreground">
+                    The address of your AdviSha server: the laptop on the same Wi-Fi (http://192.168.x.x:4000), your ngrok link, or the hosted server.
+                  </p>
+                  <Input value={server} onChange={(e) => setServer(e.target.value)} placeholder="https://your-server.example.com" inputMode="url" autoCapitalize="none" />
+                  <Button type="button" className="w-full" variant="outline" onClick={() => { setServerBase(server); window.location.reload(); }} disabled={!server.trim()}>
+                    Save server and continue
+                  </Button>
+                </div>
+              )}
+            </CardContent>
+          </Card>
+        )}
 
         <Card>
           <CardContent className="space-y-4 pt-4">
@@ -106,9 +131,13 @@ export function Login() {
                   onChange={(e) => setPassword(e.target.value)}
                   autoComplete={mode === 'login' ? 'current-password' : 'new-password'}
                 />
-                {mode === 'register' && (
+                {mode === 'register' ? (
                   <p className="text-2xs text-muted-foreground">
                     At least 10 characters, with upper case, lower case and a digit.
+                  </p>
+                ) : (
+                  <p className="text-right text-2xs">
+                    <Link to="/forgot-password" className="text-primary hover:underline">Forgot password?</Link>
                   </p>
                 )}
               </div>

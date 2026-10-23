@@ -25,6 +25,7 @@
  * Pure. The clock is an argument.
  */
 import { expiryInstant } from './decisionEngine.js';
+import { toIst } from '../../utils/time.js';
 
 export type SignalStatus =
   | 'ACTIVE'
@@ -37,6 +38,8 @@ export type SignalStatus =
 
 export interface TrackedSignal {
   action: 'BUY_CALL' | 'BUY_PUT';
+  /** How the signal was meant to be held. Intraday signals end at the close of their own day. */
+  horizon?: 'intraday' | 'swing';
   expiry: string;
   generatedAt: string;
   entryPremium: number;
@@ -68,8 +71,11 @@ export interface OutcomeUpdate {
   note: string;
 }
 
-/** Calendar days an ACTIVE signal may stay open before the plan's time stop. */
+/** Calendar days an ACTIVE swing signal may stay open before the plan's time stop. */
 export const TIME_STOP_DAYS = 3;
+/** IST minutes of day at which an intraday signal is considered flat. */
+export const INTRADAY_TIME_STOP_MIN = 15 * 60 + 15;
+const minutesLabel = (m: number): string => `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
 
 const round = (v: number, dp = 3): number => Number(v.toFixed(dp));
 
@@ -121,6 +127,17 @@ export function resolveSignalOutcome(signal: TrackedSignal, obs: Observation): O
       ...base, status: 'EXPIRED', rMultiple: r(premium),
       note: `The contract expired with the premium at ₹${premium.toFixed(2)} and neither level hit.`,
     };
+  }
+
+  if (signal.horizon === 'intraday') {
+    const nowIst = toIst(now);
+    const genIst = toIst(new Date(signal.generatedAt));
+    if (genIst.dateKey < nowIst.dateKey || nowIst.minutesOfDay >= INTRADAY_TIME_STOP_MIN) {
+      return {
+        ...base, status: 'TIMED_OUT', rMultiple: r(premium),
+        note: `Intraday signal: flat at the ${minutesLabel(INTRADAY_TIME_STOP_MIN)} IST square-off with the premium at ₹${premium.toFixed(2)} and neither level hit.`,
+      };
+    }
   }
 
   const ageDays = (now.getTime() - new Date(signal.generatedAt).getTime()) / 864e5;

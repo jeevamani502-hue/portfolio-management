@@ -6,10 +6,15 @@
  * dotenv reads the file once at startup and nothing watches it, so editing a
  * key there looks like it did nothing until the process actually restarts.
  *
- *   node scripts/restart.mjs           # api + worker + web
+ *   node scripts/restart.mjs           # api + worker + web, dev mode (reloads on edits)
+ *   node scripts/restart.mjs --stable  # api + worker from the compiled build: no reload on edits
  *   node scripts/restart.mjs api       # just the API
  *   node scripts/restart.mjs api web   # any combination
  *   node scripts/restart.mjs --stop    # stop everything, start nothing
+ *
+ * Use --stable during market hours. In dev mode every backend edit restarts
+ * the API, which drops the broker feed and re-logs in; in stable mode nothing
+ * restarts until you run this script again, so code can be edited safely.
  *
  * Windows-first, since that is where this project runs; the process lookup
  * falls back to `ps` elsewhere.
@@ -31,14 +36,23 @@ const PG_BIN = process.env.PG_BIN ?? 'C:/Program Files/PostgreSQL/17/bin';
 const PG_DATA = process.env.PG_DATA ?? 'C:/Jeevamani/bt-pgdata';
 const PG_PORT = Number(process.env.PG_PORT ?? 5433);
 
-const TARGETS = {
-  api: { match: 'src/index.ts', label: 'API', args: ['run', 'dev', '-w', 'backend'], port: 4000 },
-  worker: { match: 'src/workers', label: 'worker', args: ['run', 'dev:worker', '-w', 'backend'], port: null },
-  web: { match: 'vite', label: 'web', args: ['run', 'dev', '-w', 'frontend'], port: 5173 },
-};
-
 const argv = process.argv.slice(2);
 const stopOnly = argv.includes('--stop');
+const stable = argv.includes('--stable');
+
+// `match` lists every command-line fragment a running copy might carry, dev or
+// built, so a stable restart also stops a dev copy and vice versa.
+const TARGETS = {
+  api: {
+    match: ['src/index.ts', 'dist/index.js'], label: 'API', port: 4000,
+    args: stable ? ['run', 'start', '-w', 'backend'] : ['run', 'dev', '-w', 'backend'],
+  },
+  worker: {
+    match: ['src/workers', 'dist/workers'], label: 'worker', port: null,
+    args: stable ? ['run', 'start:worker', '-w', 'backend'] : ['run', 'dev:worker', '-w', 'backend'],
+  },
+  web: { match: ['vite'], label: 'web', args: ['run', 'dev', '-w', 'frontend'], port: 5173 },
+};
 const named = argv.filter((a) => !a.startsWith('--'));
 const selected = named.length > 0 ? named : Object.keys(TARGETS);
 
@@ -137,7 +151,7 @@ function kill(pid) {
 // ── stop ────────────────────────────────────────────────────────────────────
 for (const name of selected) {
   const { match, label } = TARGETS[name];
-  const pids = findPids(match);
+  const pids = [...new Set(match.flatMap((m) => findPids(m)))];
   if (pids.length === 0) {
     console.log(`${label}: not running`);
     continue;
@@ -162,9 +176,21 @@ if (selected.includes('api') || selected.includes('worker')) {
     process.exit(1);
   }
 }
+// Stable mode runs the compiled backend, so build it first. A failed build
+// leaves the old processes stopped rather than starting a stale one silently.
+if (stable && (selected.includes('api') || selected.includes('worker'))) {
+  console.log('\nBuilding the backend for stable mode…');
+  try {
+    execFileSync(isWindows ? 'npm.cmd' : 'npm', ['run', 'build', '-w', 'backend'], { cwd: repoRoot, stdio: 'inherit', shell: isWindows });
+  } catch {
+    console.error('Backend build failed; nothing started.');
+    process.exit(1);
+  }
+}
+
 // Detached so these outlive this script; output goes to the terminal that
 // started it, which is what you want when reading startup errors.
-console.log('');
+console.log(stable ? '\nStable mode: the API and worker run from the build and do not reload on edits.' : '');
 for (const name of selected) {
   const { label, args } = TARGETS[name];
   const logFile = join(LOG_DIR, `${name}.log`);

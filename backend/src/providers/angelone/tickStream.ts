@@ -44,6 +44,8 @@ const HEARTBEAT_MS = 10_000;
 
 /** Reconnect backoff, capped so a long outage does not become a silent one. */
 const RECONNECT_MIN_MS = 1_000;
+/** How long a connect may take before the socket is abandoned and retried. */
+const CONNECT_TIMEOUT_MS = 20_000;
 const RECONNECT_MAX_MS = 30_000;
 
 const log = logger.child({ component: 'AngelOneTickStream' });
@@ -147,7 +149,19 @@ export class AngelOneTickStream implements TickStream {
   }
 
   private async connect(): Promise<void> {
-    return new Promise((resolve) => {
+    return new Promise((resolveOnce) => {
+      // Settle exactly once, whatever happens first. A socket that neither
+      // opens nor is refused (a stalled TLS handshake, a half-dead network)
+      // used to leave the caller awaiting forever with nothing in the log,
+      // which read as "No live feed" with no explanation.
+      let settled = false;
+      const resolve = (): void => { if (!settled) { settled = true; clearTimeout(connectTimer); resolveOnce(); } };
+      const connectTimer = setTimeout(() => {
+        if (settled) return;
+        log.warn({ afterMs: CONNECT_TIMEOUT_MS }, 'Tick stream connect timed out; closing the socket so the reconnect loop can retry');
+        try { ws.terminate(); } catch { /* already gone */ }
+        resolve();
+      }, CONNECT_TIMEOUT_MS);
       const ws = new WebSocket(WS_URL, {
         headers: {
           Authorization: this.creds.jwtToken,
@@ -199,9 +213,11 @@ export class AngelOneTickStream implements TickStream {
       ws.on('error', (err) => {
         log.warn({ err: err.message }, 'Tick stream error');
         this.sub.onStatus({ connected: false, reason: err.message });
+        resolve();
       });
 
       ws.on('close', (code) => {
+        resolve();
         this.clearHeartbeat();
         this.sub.onStatus({
           connected: false,
