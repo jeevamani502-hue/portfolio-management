@@ -35,6 +35,29 @@ import type {
 import { symbolKey } from '../types.js';
 import { toIst, type Timeframe } from '../../utils/time.js';
 import { AngelOneTickStream } from './tickStream.js';
+import { networkInterfaces } from 'node:os';
+// ── client network identity for SmartAPI headers ────────────────────────────
+// Resolved once per process in the background; placeholders until then.
+const clientNetwork = { localIp: '127.0.0.1', publicIp: '127.0.0.1', mac: '00:00:00:00:00:00' };
+(() => {
+  try {
+    for (const list of Object.values(networkInterfaces())) {
+      for (const n of list ?? []) {
+        if (n.family === 'IPv4' && !n.internal) {
+          clientNetwork.localIp = n.address;
+          if (n.mac && n.mac !== '00:00:00:00:00:00') clientNetwork.mac = n.mac;
+          break;
+        }
+      }
+      if (clientNetwork.localIp !== '127.0.0.1') break;
+    }
+  } catch { /* keep placeholders */ }
+  fetch('https://api.ipify.org', { signal: AbortSignal.timeout(6000) })
+    .then((r) => r.text())
+    .then((ip) => { if (/^\d+\.\d+\.\d+\.\d+$/.test(ip.trim())) clientNetwork.publicIp = ip.trim(); })
+    .catch(() => { /* keep placeholder */ });
+})();
+
 
 /**
  * SmartAPI's quote endpoint rejects more than 50 tokens per call with
@@ -197,16 +220,22 @@ export class AngelOneProvider extends HttpProvider implements MarketDataProvider
     return Boolean(this.apiKey && this.clientCode && this.mpin && this.totpSecret);
   }
 
-  /** SmartAPI requires these client headers on every call. */
+  /**
+   * SmartAPI requires these client headers on every call. Since April 2026
+   * orders are accepted only from a registered static IP, so the real public
+   * and local addresses are declared rather than placeholders; a mismatch
+   * between the declared and the actual source address is one more reason
+   * for a rejection.
+   */
   private baseHeaders(): Record<string, string> {
     return {
       'Content-Type': 'application/json',
       Accept: 'application/json',
       'X-UserType': 'USER',
       'X-SourceID': 'WEB',
-      'X-ClientLocalIP': '127.0.0.1',
-      'X-ClientPublicIP': '127.0.0.1',
-      'X-MACAddress': '00:00:00:00:00:00',
+      'X-ClientLocalIP': clientNetwork.localIp,
+      'X-ClientPublicIP': clientNetwork.publicIp,
+      'X-MACAddress': clientNetwork.mac,
       'X-PrivateKey': this.apiKey ?? '',
     };
   }
