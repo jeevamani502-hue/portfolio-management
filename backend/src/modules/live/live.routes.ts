@@ -167,8 +167,9 @@ liveRouter.post(
 /** Reconcile with the broker now, instead of waiting for the worker. */
 liveRouter.post('/sync', asyncHandler(async (req, res) => {
   await live.syncLiveOrders(req.user!.id);
+  const reconciled = await live.reconcileWithBroker(req.user!.id);
   await live.manageLiveExits(req.user!.id);
-  respond(res, { synced: true });
+  respond(res, { synced: true, reconciled });
 }));
 
 liveRouter.get('/performance', asyncHandler(async (req, res) => {

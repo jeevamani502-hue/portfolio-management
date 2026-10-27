@@ -818,6 +818,94 @@ export async function syncLiveOrders(userId: string, registry?: ProviderRegistry
   }
 }
 
+/**
+ * Reconcile with what the broker actually holds.
+ *
+ * A position sold from the Angel One app, squared off by the broker at the
+ * close, or cancelled there while pending, never passes through this code,
+ * so the ledger used to keep showing it as active. Every sweep now compares
+ * each OPEN trade with the broker's position book: if the broker holds less
+ * than the ledger says, the difference was sold elsewhere and is booked at
+ * the real fill from the order book (or, failing that, the last price, and
+ * the note says so). Profit and loss then settle exactly as for the app's
+ * own exits.
+ */
+export async function reconcileWithBroker(userId: string, registry?: ProviderRegistry): Promise<number> {
+  const open = await queryRows<LiveTradeRow>(
+    `SELECT ${TRADE_SELECT} FROM live_trades WHERE user_id = $1 AND status = 'OPEN'`, [userId],
+  );
+  if (open.length === 0) return 0;
+  const reg = registry ?? (await registryForUser(userId));
+  const broker = brokerFor(reg);
+  if (!broker.getPositions || !broker.getOrders) return 0;
+
+  let positions: Awaited<ReturnType<NonNullable<MarketDataProvider['getPositions']>>>;
+  let orders: NormalizedOrder[];
+  try {
+    [positions, orders] = await Promise.all([broker.getPositions(), broker.getOrders()]);
+  } catch (err) {
+    log.warn({ userId, err: (err as Error).message }, 'Broker reconciliation skipped: position book unavailable');
+    return 0;
+  }
+  const ourOrderIds = new Set<string>();
+  for (const t of open) { if (t.entry_order_id) ourOrderIds.add(t.entry_order_id); if (t.exit_order_id) ourOrderIds.add(t.exit_order_id); }
+  const heldBySymbol = new Map<string, number>();
+  for (const p of positions) {
+    const key = p.tradingsymbol.toUpperCase();
+    heldBySymbol.set(key, (heldBySymbol.get(key) ?? 0) + Math.max(0, p.quantity));
+  }
+
+  let reconciled = 0;
+  for (const t of open) {
+    try {
+      const symbol = t.tradingsymbol.toUpperCase();
+      // Other open ledger rows on the same contract share the broker position.
+      const ledgerQty = open.filter((o) => o.tradingsymbol.toUpperCase() === symbol).reduce((a, o) => a + o.remaining_qty, 0);
+      const held = heldBySymbol.get(symbol) ?? 0;
+      if (held >= ledgerQty) continue;
+      const soldQty = Math.min(t.remaining_qty, ledgerQty - held);
+      if (soldQty <= 0) continue;
+
+      // The real fill: completed SELL orders on this contract that are not ours, after our entry.
+      const since = t.entry_at ? new Date(t.entry_at).getTime() : 0;
+      const external = orders.filter((o) =>
+        o.tradingsymbol.toUpperCase() === symbol && o.side === 'SELL' && o.status === 'COMPLETE'
+        && !ourOrderIds.has(o.orderId) && o.averagePrice !== null && o.filledQuantity > 0
+        && new Date(o.updatedAt).getTime() >= since - 60_000);
+      let price: number | null = null;
+      let source = 'broker order book';
+      if (external.length > 0) {
+        const qty = external.reduce((a, o) => a + o.filledQuantity, 0);
+        price = external.reduce((a, o) => a + o.averagePrice! * o.filledQuantity, 0) / qty;
+      } else {
+        const contract = t.instrument_id ? await instrumentsRepo.getById(Number(t.instrument_id)) : null;
+        const q = contract ? await getQuote(reg, contract) : null;
+        if (q && isAvailable(q)) { price = q.value.ltp; source = 'last traded price (no matching sell order found in the order book)'; }
+      }
+      if (price === null) { log.warn({ tradeId: t.id }, 'Position gone at the broker but no price to book it at; will retry'); continue; }
+
+      const kind: 'PARTIAL' | 'FULL' = soldQty >= t.remaining_qty ? 'FULL' : 'PARTIAL';
+      await query(
+        `UPDATE live_trades SET exit_code = 'CLOSED_AT_BROKER', exit_kind = $2, exit_order_qty = $3, exit_placed_at = now(), updated_at = now() WHERE id = $1`,
+        [t.id, kind, soldQty],
+      );
+      await logBroker(Number(t.id), { event: 'closed_at_broker', soldQty, price, source, externalOrders: external.map((o) => o.orderId) });
+      await applyExitFill({ ...t, exit_code: 'CLOSED_AT_BROKER', exit_kind: kind, exit_order_qty: soldQty }, soldQty, Number(price.toFixed(2)));
+      log.warn({ userId, tradeId: t.id, symbol, soldQty, price, source }, 'LIVE POSITION CLOSED AT THE BROKER (outside the app)');
+      await notify(userId, {
+        kind: 'live', severity: 'action',
+        title: `${t.tradingsymbol}: ${kind === 'FULL' ? 'closed' : `${soldQty} sold`} at the broker`,
+        message: `The broker no longer holds this position, so it was booked at ₹${price.toFixed(2)} from the ${source}. Profit and loss are settled as for any other exit.`,
+        payload: { tradeId: Number(t.id), soldQty, price }, link: '/live',
+      });
+      reconciled += 1;
+    } catch (err) {
+      log.error({ err, tradeId: t.id }, 'Broker reconciliation failed for this trade');
+    }
+  }
+  return reconciled;
+}
+
 // ── exit management ─────────────────────────────────────────────────────────
 
 async function placeExit(
@@ -1075,6 +1163,7 @@ export async function sweepLiveOrders(): Promise<void> {
     try {
       const registry = await registryForUser(u.user_id);
       await syncLiveOrders(u.user_id, registry);
+      await reconcileWithBroker(u.user_id, registry);
       await manageLiveExits(u.user_id, registry);
     } catch (err) {
       log.error({ err, userId: u.user_id }, 'Live order sweep failed for this user');

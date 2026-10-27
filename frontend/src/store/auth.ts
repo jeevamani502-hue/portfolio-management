@@ -1,12 +1,14 @@
 import { create } from 'zustand';
 import {
-  api, setAccessToken, setUnauthorizedHandler, refreshAccessToken, ApiRequestError,
+  api, setAccessToken, getAccessToken, setUnauthorizedHandler, refreshAccessToken, ApiRequestError,
 } from '@/services/api';
 import type { AuthUserDto } from '@/types/api';
 import { storeRefreshToken } from '@/lib/server';
 
 interface AuthState {
   user: AuthUserDto | null;
+  /** Set while an administrator is viewing the app as another user. */
+  impersonating: { adminUser: AuthUserDto; adminToken: string } | null;
   /** Null until the initial session probe finishes. */
   initialised: boolean;
   loading: boolean;
@@ -18,10 +20,15 @@ interface AuthState {
   /** Attempt to restore a session from the refresh cookie on page load. */
   restore: () => Promise<void>;
   clearError: () => void;
+  /** Admin only: switch the whole app to another user's view for 30 minutes. */
+  viewAs: (userId: string) => Promise<void>;
+  /** Back to the administrator's own session. */
+  endViewAs: () => void;
 }
 
 export const useAuth = create<AuthState>((set) => ({
   user: null,
+  impersonating: null,
   initialised: false,
   loading: false,
   error: null,
@@ -86,10 +93,33 @@ export const useAuth = create<AuthState>((set) => ({
   },
 
   clearError: () => set({ error: null }),
+
+  viewAs: async (userId) => {
+    const adminUser = useAuth.getState().user;
+    const adminToken = getAccessToken();
+    if (!adminUser || !adminToken) throw new Error('Sign in as an administrator first.');
+    const res = await api.admin.impersonate(userId);
+    setAccessToken(res.accessToken);
+    set({ user: res.user, impersonating: { adminUser, adminToken } });
+  },
+
+  endViewAs: () => {
+    const imp = useAuth.getState().impersonating;
+    if (!imp) return;
+    setAccessToken(imp.adminToken);
+    set({ user: imp.adminUser, impersonating: null });
+  },
 }));
 
 // When the API client exhausts its refresh attempt, drop the session.
 setUnauthorizedHandler(() => {
+  // A view-as session that expires falls back to the administrator, not to sign-in.
+  const imp = useAuth.getState().impersonating;
+  if (imp) {
+    setAccessToken(imp.adminToken);
+    useAuth.setState({ user: imp.adminUser, impersonating: null });
+    return;
+  }
   setAccessToken(null);
   useAuth.setState({ user: null, initialised: true });
 });

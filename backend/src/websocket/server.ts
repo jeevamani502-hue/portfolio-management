@@ -98,6 +98,7 @@ export function attachWebSocketServer(server: Server): WebSocketServer {
 
   startFlushLoop();
   startHeartbeat(wss);
+  startStatusWatcher();
   void startRedisBridge();
 
   logger.info('WebSocket gateway attached at /ws');
@@ -272,6 +273,29 @@ function startFlushLoop(): void {
     }
   }, COALESCE_MS);
   flushTimer.unref();
+}
+
+/**
+ * Tell every open browser when the upstream feed comes up or goes down.
+ *
+ * The status used to be sent once, when a browser connected. A browser that
+ * connected while the broker socket was still logging in was told
+ * "unavailable" and stayed on "No live feed" until a tick arrived, which
+ * before 09:15 is never. Watching the status key and re-sending on change
+ * closes that gap for every client at once.
+ */
+let statusWatcher: NodeJS.Timeout | null = null;
+let lastUpstream: boolean | null = null;
+function startStatusWatcher(): void {
+  if (statusWatcher) return;
+  statusWatcher = setInterval(() => {
+    void upstreamFeedAvailable().then((up) => {
+      if (lastUpstream !== null && up === lastUpstream) return;
+      lastUpstream = up;
+      for (const client of clients.values()) void sendStatus(client);
+    }).catch(() => undefined);
+  }, 5_000);
+  statusWatcher.unref();
 }
 
 function startHeartbeat(wss: WebSocketServer): void {

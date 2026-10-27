@@ -137,6 +137,8 @@ export function Layout() {
   const { dark, toggle } = useTheme();
   const user = useAuth((s) => s.user);
   const logout = useAuth((s) => s.logout);
+  const impersonating = useAuth((s) => s.impersonating);
+  const endViewAs = useAuth((s) => s.endViewAs);
   const navigate = useNavigate();
 
   // Open the websocket once the user is authenticated.
@@ -271,6 +273,17 @@ export function Layout() {
         </header>
 
         <main className="min-w-0 flex-1 p-4">
+          {impersonating && (
+            <div className="mb-3 flex flex-wrap items-center justify-between gap-2 rounded border border-delayed/60 bg-delayed/10 px-3 py-2 text-sm">
+              <span>
+                Viewing as <strong>{user?.email}</strong> — everything on screen is this user's data, and anything you change here changes it for them.
+                The view ends on its own after 30 minutes.
+              </span>
+              <Button variant="outline" className="h-7 text-xs" onClick={() => { endViewAs(); navigate('/admin'); }}>
+                Return to {impersonating.adminUser.email}
+              </Button>
+            </div>
+          )}
           <Outlet />
         </main>
 

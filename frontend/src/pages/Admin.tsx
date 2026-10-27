@@ -14,6 +14,7 @@ import { Metric } from '@/components/market/DataValue';
 import { relativeTime } from '@/lib/format';
 import { cn } from '@/lib/utils';
 import { useAuth } from '@/store/auth';
+import { useNavigate } from 'react-router-dom';
 import type { AdminUserDto, AdminUserDetailDto } from '@/types/api';
 
 const inr = (n: number | null | undefined, dp = 0) =>
@@ -150,6 +151,8 @@ function UserPanel({ id, isSelf, onRole, onActive, onLogoutAll, onDelete, onNoti
   onNotice: (s: string) => void;
 }) {
   const d = useQuery({ queryKey: ['admin', 'user', id], queryFn: () => api.admin.user(id) });
+  const navigate = useNavigate();
+  const viewAs = useAuth((s) => s.viewAs);
   const [newPassword, setNewPassword] = useState('');
   const [confirmDelete, setConfirmDelete] = useState('');
   const [via, setVia] = useState<'auto' | 'email' | 'telegram' | 'sms'>('auto');
@@ -196,7 +199,15 @@ function UserPanel({ id, isSelf, onRole, onActive, onLogoutAll, onDelete, onNoti
                 <UserX className="h-3.5 w-3.5" aria-hidden /> {u.isActive ? 'Disable account' : 'Enable account'}
               </Button>
               <Button variant="outline" className="h-8 text-xs" onClick={onLogoutAll}><LogOut className="h-3.5 w-3.5" aria-hidden /> Sign out everywhere</Button>
+              {!isSelf && u.isActive && (
+                <Button className="h-8 text-xs" onClick={() => { viewAs(id).then(() => navigate('/')).catch((e) => onNotice(e instanceof Error ? e.message : 'Could not switch.')); }}>
+                  <ShieldCheck className="h-3.5 w-3.5" aria-hidden /> View the app as this user
+                </Button>
+              )}
             </div>
+            <p className="text-2xs text-muted-foreground">
+              "View as" switches every page to this user's account for 30 minutes: their dashboard, paper and live trading, reports, settings and alerts. It is recorded in the audit trail.
+            </p>
           </div>
 
           <div className="space-y-2 rounded border border-border p-3">

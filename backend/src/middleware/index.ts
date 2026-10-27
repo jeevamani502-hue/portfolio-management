@@ -76,6 +76,8 @@ export interface AccessTokenPayload {
   sub: string;
   email: string;
   role: AuthUser['role'];
+  /** Administrator id when this session is an admin viewing as the user. */
+  imp?: string;
 }
 
 export function signAccessToken(user: AuthUser): string {
@@ -83,6 +85,18 @@ export function signAccessToken(user: AuthUser): string {
     { sub: user.id, email: user.email, role: user.role } satisfies AccessTokenPayload,
     env.JWT_ACCESS_SECRET,
     { expiresIn: env.JWT_ACCESS_TTL as jwt.SignOptions['expiresIn'] },
+  );
+}
+
+/**
+ * An administrator viewing the app as another user: a 30-minute access token
+ * for that user with no refresh token behind it, so the view ends on its own.
+ */
+export function signImpersonationToken(user: AuthUser, adminId: string): string {
+  return jwt.sign(
+    { sub: user.id, email: user.email, role: user.role, imp: adminId } satisfies AccessTokenPayload,
+    env.JWT_ACCESS_SECRET,
+    { expiresIn: '30m' },
   );
 }
 

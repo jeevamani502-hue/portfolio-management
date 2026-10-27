@@ -32,7 +32,7 @@ const PRESETS: Array<{ id: string; label: string; from: () => string; to: () => 
 const REASON: Record<string, string> = {
   TARGET: 'Target', STOP: 'Stop', EOD: 'Day end', THESIS: 'Direction changed', GIVEBACK: 'Profit protected',
   NEWS: 'News', MANUAL: 'Closed by you', EXPIRY: 'Expiry', TARGET1: 'Target 1', TARGET2: 'Target 2',
-  INVALIDATED: 'Invalidated', SQUARE_OFF: 'Square-off', DIRECTION: 'Direction changed', SCORE: 'Score faded',
+  INVALIDATED: 'Invalidated', SQUARE_OFF: 'Square-off', DIRECTION: 'Direction changed', SCORE: 'Score faded', CLOSED_AT_BROKER: 'Closed at broker',
 };
 
 export function Reports() {

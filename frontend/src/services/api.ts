@@ -484,6 +484,8 @@ export const api = {
     sendReset: (id: string, via?: 'email' | 'telegram' | 'sms') =>
       request<{ sent: boolean; via: string; link: string | null; message: string }>(`/admin/users/${id}/password`, { method: 'POST', body: { sendResetLink: true, ...(via ? { via } : {}) } }),
     logoutAll: (id: string) => request<{ revoked: number }>(`/admin/users/${id}/logout-all`, { method: 'POST' }),
+    impersonate: (id: string) =>
+      request<{ accessToken: string; expiresIn: string; user: AuthUserDto }>(`/admin/users/${id}/impersonate`, { method: 'POST' }),
     deleteUser: (id: string) => request<{ deleted: boolean }>(`/admin/users/${id}`, { method: 'DELETE' }),
     audit: (limit = 100) => request<AuditEntryDto[]>('/admin/audit', { query: { limit } }),
     saveSettings: (body: { registrationOpen?: boolean }) => request<AdminOverviewDto>('/admin/settings', { method: 'PUT', body }),

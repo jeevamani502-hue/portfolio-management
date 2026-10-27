@@ -4,7 +4,7 @@
  */
 import { Router } from 'express';
 import { z } from 'zod';
-import { asyncHandler, respond, requireAuth, requireRole, validate, auditLog, rateLimit } from '../../middleware/index.js';
+import { asyncHandler, respond, requireAuth, requireRole, validate, auditLog, rateLimit, allowTokensInResponse } from '../../middleware/index.js';
 import { badRequest, notFound } from '../../utils/errors.js';
 import * as admin from './admin.service.js';
 
@@ -62,6 +62,20 @@ adminRouter.post(
         : `Reset link sent by ${r.via}. It works once and expires in 30 minutes.`;
       respond(res, { sent: true, via: r.via, link: r.link, message: msg });
     } catch (err) { throw badRequest(err instanceof Error ? err.message : 'could not reset'); }
+  }),
+);
+
+adminRouter.post(
+  '/users/:id/impersonate',
+  // The reply carries an access token on purpose; without this the response scrubber blanks it.
+  allowTokensInResponse,
+  validate(idParam, 'params'),
+  rateLimit({ bucket: 'admin-impersonate', limit: 30, windowSeconds: 3600 }),
+  auditLog('admin.impersonate', 'user'),
+  asyncHandler(async (req, res) => {
+    const { id } = req.params as unknown as { id: string };
+    try { respond(res, await admin.impersonate(req.user!.id, id)); }
+    catch (err) { throw badRequest(err instanceof Error ? err.message : 'could not switch'); }
   }),
 );
 

@@ -13,6 +13,7 @@ import { getPerformance as paperPerformance, listTrades as listPaperTrades, type
 import { livePerformance, listLiveTrades, type LiveTradeRow } from '../live/live.service.js';
 import { createResetLink, deliverResetLink, type ResetDelivery } from '../auth/reset.service.js';
 import { channelStatus, type ChannelStatus } from '../notifications/channels.service.js';
+import { signImpersonationToken } from '../../middleware/index.js';
 
 export type Role = 'user' | 'analyst' | 'admin';
 
@@ -244,6 +245,21 @@ export async function deleteUser(adminId: string, userId: string): Promise<void>
   );
   if (Number(live?.n ?? 0) > 0) throw new Error('This account has open real-money positions. Close them at the broker first.');
   await query(`DELETE FROM users WHERE id = $1`, [userId]);
+}
+
+/** A token to view the app as this user for 30 minutes. Audit-logged by the route. */
+export async function impersonate(adminId: string, userId: string): Promise<{ accessToken: string; expiresIn: string; user: { id: string; email: string; fullName: string | null; role: Role } }> {
+  if (userId === adminId) throw new Error('You are already signed in as yourself.');
+  const u = await queryOne<{ id: string; email: string; full_name: string | null; role: Role; is_active: boolean }>(
+    `SELECT id, email, full_name, role, is_active FROM users WHERE id = $1`, [userId],
+  );
+  if (!u) throw new Error('No such user.');
+  if (!u.is_active) throw new Error('That account is disabled; enable it first.');
+  return {
+    accessToken: signImpersonationToken({ id: u.id, email: u.email, role: u.role }, adminId),
+    expiresIn: '30m',
+    user: { id: u.id, email: u.email, fullName: u.full_name, role: u.role },
+  };
 }
 
 export async function recentAudit(limit = 100): Promise<Array<{ email: string | null; action: string; resource: string | null; resourceId: string | null; ip: string | null; at: string }>> {
