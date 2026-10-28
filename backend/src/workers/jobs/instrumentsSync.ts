@@ -14,10 +14,14 @@ const log = logger.child({ job: 'instruments-sync' });
  * registry fail over between brokers mid-session — the fallback provider
  * already knows how to address the instrument.
  */
-export async function syncInstruments(registry: ProviderRegistry): Promise<void> {
+export async function syncInstruments(
+  registry: ProviderRegistry,
+  opts: { only?: readonly string[] } = {},
+): Promise<void> {
   const capable = registry
     .all()
-    .filter((p) => p.isConfigured() && p.manifest.capabilities.includes('instruments'));
+    .filter((p) => p.isConfigured() && p.manifest.capabilities.includes('instruments'))
+    .filter((p) => !opts.only || opts.only.includes(p.manifest.id));
 
   if (capable.length === 0) {
     log.warn('No configured provider can supply an instrument master; skipping sync');

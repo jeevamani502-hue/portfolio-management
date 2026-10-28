@@ -55,7 +55,7 @@ import type {
   ProviderId,
   Exchange,
   InstrumentType,
-} from '../types.js';
+  OrderRequest, OrderProduct, OrderStatus, NormalizedOrder, NormalizedFunds } from '../types.js';
 import { symbolKey } from '../types.js';
 import { toIst, type Timeframe } from '../../utils/time.js';
 
@@ -148,6 +148,8 @@ export class GrowwProvider extends HttpProvider implements MarketDataProvider {
       'indices',
       'holdings',
       'positions',
+      'orders',
+      'funds',
     ],
     credentialFields: [
       {
@@ -479,6 +481,102 @@ export class GrowwProvider extends HttpProvider implements MarketDataProvider {
       });
     }
     return out;
+  }
+
+  // ── orders ────────────────────────────────────────────────────────────────
+  // Groww Trading API v1. Orders are addressed by trading symbol, exchange and
+  // segment, not by token. Every request and reply is logged: these move money.
+
+  private static growwProduct(product: OrderProduct): string {
+    return product === 'INTRADAY' ? 'MIS' : 'NRML';
+  }
+
+  async placeOrder(req: OrderRequest): Promise<{ orderId: string }> {
+    const segment = SEGMENT_FOR_EXCHANGE[req.exchange] ?? 'CASH';
+    // Groww wants an 8–20 character reference of letters, digits and hyphens.
+    const ref = `AD-${(req.tag ?? 'X').replace(/[^A-Za-z0-9]/g, '')}-${Date.now().toString(36)}`.slice(0, 20);
+    const body = {
+      trading_symbol: req.tradingsymbol,
+      quantity: req.quantity,
+      price: req.orderType === 'LIMIT' ? Number((Math.round((req.price ?? 0) * 20) / 20).toFixed(2)) : 0,
+      validity: 'DAY',
+      exchange: this.exchangeFor(req.exchange),
+      segment,
+      product: GrowwProvider.growwProduct(req.product),
+      order_type: req.orderType,
+      transaction_type: req.side,
+      order_reference_id: ref,
+    };
+    this.log.info({ order: body }, 'Placing order');
+    const res = await this.http<GrowwEnvelope<{ groww_order_id?: string; order_status?: string; remark?: string }>>('/v1/order/create', {
+      method: 'POST', headers: { ...(await this.headers()), 'Content-Type': 'application/json' }, body, throttleGroup: 'default', retries: 0,
+    });
+    this.log.info({ reply: res }, 'Order reply');
+    const orderId = res.payload?.groww_order_id;
+    if (!orderId || (res.status && res.status !== 'SUCCESS')) {
+      throw new ProviderError('groww', `Order rejected: ${res.error?.message ?? res.payload?.remark ?? res.status ?? 'unknown'}`, { retryable: false });
+    }
+    return { orderId };
+  }
+
+  async cancelOrder(orderId: string): Promise<void> {
+    const res = await this.http<GrowwEnvelope<{ order_status?: string }>>('/v1/order/cancel', {
+      method: 'POST', headers: { ...(await this.headers()), 'Content-Type': 'application/json' },
+      body: { segment: 'FNO', groww_order_id: orderId }, throttleGroup: 'default', retries: 0,
+    });
+    this.log.info({ orderId, reply: res }, 'Cancel reply');
+    if (res.status && res.status !== 'SUCCESS') {
+      throw new ProviderError('groww', `Cancel failed: ${res.error?.message ?? res.status}`, { retryable: false });
+    }
+  }
+
+  async getOrders(): Promise<NormalizedOrder[]> {
+    const res = await this.http<GrowwEnvelope<{ order_list?: Array<{
+      groww_order_id?: string; order_status?: string; trading_symbol?: string; transaction_type?: string;
+      quantity?: number | string; filled_quantity?: number | string; average_fill_price?: number | string;
+      remark?: string; exchange_time?: string; created_at?: string;
+    }> }>>('/v1/order/list', {
+      headers: await this.headers(), query: { segment: 'FNO', page: 0, page_size: 100 }, throttleGroup: 'default',
+    });
+    return (res.payload?.order_list ?? [])
+      .filter((o) => o.groww_order_id)
+      .map((o) => {
+        const raw = (o.order_status ?? '').toUpperCase();
+        const status: OrderStatus =
+          raw === 'EXECUTED' || raw === 'COMPLETED' || raw === 'COMPLETE' ? 'COMPLETE'
+          : raw === 'REJECTED' || raw === 'FAILED' ? 'REJECTED'
+          : raw === 'CANCELLED' ? 'CANCELLED'
+          : raw === 'OPEN' || raw === 'APPROVED' || raw === 'ACKED' || raw === 'NEW' || raw === 'TRIGGER_PENDING' ? 'OPEN'
+          : 'PENDING';
+        const avg = num(o.average_fill_price);
+        return {
+          orderId: String(o.groww_order_id),
+          status,
+          tradingsymbol: (o.trading_symbol ?? '').toUpperCase(),
+          side: (o.transaction_type ?? 'BUY').toUpperCase() === 'SELL' ? 'SELL' : 'BUY',
+          quantity: num(o.quantity) ?? 0,
+          filledQuantity: num(o.filled_quantity) ?? 0,
+          averagePrice: avg !== null && avg > 0 ? avg : null,
+          message: o.remark?.trim() || null,
+          updatedAt: isoOrNow(o.exchange_time ?? o.created_at),
+        } satisfies NormalizedOrder;
+      });
+  }
+
+  /** Available margin as Groww reports it. `clearing_margin` is the balance free for new trades. */
+  async getFunds(): Promise<NormalizedFunds> {
+    const res = await this.http<GrowwEnvelope<{
+      clearing_margin?: number | string; net_margin_used?: number | string; collateral_available?: number | string;
+      collateral_used?: number | string; adhoc_margin?: number | string;
+    }>>('/v1/margins/detail/user', { headers: await this.headers(), throttleGroup: 'default' });
+    const p = res.payload ?? {};
+    const availableCash = num(p.clearing_margin);
+    if (availableCash === null) throw new ProviderError('groww', 'Margin reply had no clearing_margin figure', { retryable: true });
+    const used = num(p.net_margin_used);
+    return {
+      availableCash, net: used === null ? null : availableCash + used, utilised: used,
+      collateral: num(p.collateral_available), m2mUnrealised: null, m2mRealised: null, fetchedAt: new Date().toISOString(),
+    };
   }
 
   // ── quotes ────────────────────────────────────────────────────────────────

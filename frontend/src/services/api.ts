@@ -498,7 +498,7 @@ export const api = {
     providerCatalogue: () => request<ProviderCatalogueDto[]>('/settings/providers/catalogue'),
     providers: () => requestWithMeta<ConfiguredProviderDto[]>('/settings/providers'),
     saveProvider: (body: Record<string, unknown>) =>
-      request<{ id: string; saved: boolean }>('/settings/providers', { method: 'POST', body }),
+      request<{ id: string; saved: boolean; syncNote: string | null }>('/settings/providers', { method: 'POST', body }),
     testProvider: (provider: string) =>
       request<{ ok: boolean; latencyMs: number; detail: string | null }>(
         `/settings/providers/${provider}/test`, { method: 'POST' },

@@ -50,6 +50,7 @@ const configSchema = z.object({
   stopAtrMultiple: z.number().min(0.5).max(3).optional(),
   target1R: z.number().min(0.5).max(5).optional(),
   target2R: z.number().min(0.75).max(10).optional(),
+  broker: z.enum(['auto', 'angelone', 'groww', 'kite', 'dhan']).optional(),
 });
 
 liveRouter.get('/status', asyncHandler(async (req, res) => {

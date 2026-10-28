@@ -36,6 +36,7 @@ import { symbolKey } from '../types.js';
 import { toIst, type Timeframe } from '../../utils/time.js';
 import { AngelOneTickStream } from './tickStream.js';
 import { networkInterfaces } from 'node:os';
+import { publicIp, lastKnownPublicIp } from '../../utils/publicIp.js';
 // ── client network identity for SmartAPI headers ────────────────────────────
 // Resolved once per process in the background; placeholders until then.
 const clientNetwork = { localIp: '127.0.0.1', publicIp: '127.0.0.1', mac: '00:00:00:00:00:00' };
@@ -52,10 +53,7 @@ const clientNetwork = { localIp: '127.0.0.1', publicIp: '127.0.0.1', mac: '00:00
       if (clientNetwork.localIp !== '127.0.0.1') break;
     }
   } catch { /* keep placeholders */ }
-  fetch('https://api.ipify.org', { signal: AbortSignal.timeout(6000) })
-    .then((r) => r.text())
-    .then((ip) => { if (/^\d+\.\d+\.\d+\.\d+$/.test(ip.trim())) clientNetwork.publicIp = ip.trim(); })
-    .catch(() => { /* keep placeholder */ });
+  void publicIp();
 })();
 
 
@@ -234,7 +232,7 @@ export class AngelOneProvider extends HttpProvider implements MarketDataProvider
       'X-UserType': 'USER',
       'X-SourceID': 'WEB',
       'X-ClientLocalIP': clientNetwork.localIp,
-      'X-ClientPublicIP': clientNetwork.publicIp,
+      'X-ClientPublicIP': lastKnownPublicIp() ?? clientNetwork.publicIp,
       'X-MACAddress': clientNetwork.mac,
       'X-PrivateKey': this.apiKey ?? '',
     };

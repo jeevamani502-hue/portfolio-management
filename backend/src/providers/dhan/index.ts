@@ -32,7 +32,7 @@ import type {
   ProviderId,
   Exchange,
   InstrumentType,
-} from '../types.js';
+  OrderRequest, OrderStatus, NormalizedOrder, NormalizedFunds, NormalizedPosition } from '../types.js';
 import { symbolKey } from '../types.js';
 import { isIntraday, type Timeframe } from '../../utils/time.js';
 
@@ -137,6 +137,9 @@ export class DhanProvider extends HttpProvider implements MarketDataProvider {
       'optionChain',
       'optionExpiries',
       'indices',
+      'positions',
+      'orders',
+      'funds',
     ],
     credentialFields: [
       {
@@ -436,6 +439,124 @@ export class DhanProvider extends HttpProvider implements MarketDataProvider {
 
   // ── instruments ───────────────────────────────────────────────────────────
 
+  // ── orders, positions, funds (DhanHQ v2) ──────────────────────────────────
+  // Orders are addressed by Dhan's security id, which the instrument sync
+  // stores against each contract once Dhan is connected. Every request and
+  // reply is logged: these move money.
+
+  async placeOrder(req: OrderRequest): Promise<{ orderId: string }> {
+    if (!req.providerToken) {
+      throw new ProviderError('dhan', `No Dhan security id for ${req.tradingsymbol}. Run the instruments sync and try again.`, { retryable: false });
+    }
+    const body = {
+      dhanClientId: this.clientId,
+      correlationId: (req.tag ?? '').slice(0, 25),
+      transactionType: req.side,
+      exchangeSegment: SEGMENT[req.exchange] ?? 'NSE_FNO',
+      productType: req.product === 'INTRADAY' ? 'INTRADAY' : 'MARGIN',
+      orderType: req.orderType,
+      validity: 'DAY',
+      securityId: req.providerToken,
+      quantity: req.quantity,
+      disclosedQuantity: 0,
+      price: req.orderType === 'LIMIT' ? Number((Math.round((req.price ?? 0) * 20) / 20).toFixed(2)) : 0,
+      afterMarketOrder: false,
+    };
+    this.log.info({ order: body }, 'Placing order');
+    let res: { orderId?: string; orderStatus?: string; errorMessage?: string; errorCode?: string };
+    try {
+      res = await this.http('/orders', { method: 'POST', headers: this.headers(), body, throttleGroup: 'default', retries: 0 });
+    } catch (err) {
+      throw new ProviderError('dhan', `Order rejected: ${(err as Error).message.slice(0, 300)}`, { retryable: false });
+    }
+    this.log.info({ reply: res }, 'Order reply');
+    if (!res.orderId || res.orderStatus === 'REJECTED') {
+      throw new ProviderError('dhan', `Order rejected: ${res.errorMessage ?? res.orderStatus ?? res.errorCode ?? 'unknown'}`, { retryable: false });
+    }
+    return { orderId: String(res.orderId) };
+  }
+
+  async cancelOrder(orderId: string): Promise<void> {
+    let res: { orderStatus?: string; errorMessage?: string };
+    try {
+      res = await this.http(`/orders/${encodeURIComponent(orderId)}`, { method: 'DELETE', headers: this.headers(), throttleGroup: 'default', retries: 0 });
+    } catch (err) {
+      throw new ProviderError('dhan', `Cancel failed: ${(err as Error).message.slice(0, 300)}`, { retryable: false });
+    }
+    this.log.info({ orderId, reply: res }, 'Cancel reply');
+    if (res.orderStatus && res.orderStatus === 'REJECTED') {
+      throw new ProviderError('dhan', `Cancel failed: ${res.errorMessage ?? 'rejected'}`, { retryable: false });
+    }
+  }
+
+  async getOrders(): Promise<NormalizedOrder[]> {
+    const rows = await this.http<Array<{
+      orderId?: string | number; orderStatus?: string; tradingSymbol?: string; transactionType?: string;
+      quantity?: number | string; filledQty?: number | string; averageTradedPrice?: number | string;
+      omsErrorDescription?: string; updateTime?: string; createTime?: string;
+    }>>('/orders', { headers: this.headers(), throttleGroup: 'default' });
+    return (Array.isArray(rows) ? rows : [])
+      .filter((o) => o.orderId !== undefined && o.orderId !== null)
+      .map((o) => {
+        const raw = (o.orderStatus ?? '').toUpperCase();
+        const status: OrderStatus =
+          raw === 'TRADED' ? 'COMPLETE'
+          : raw === 'REJECTED' ? 'REJECTED'
+          : raw === 'CANCELLED' || raw === 'EXPIRED' ? 'CANCELLED'
+          : raw === 'PENDING' || raw === 'TRANSIT' || raw === 'PART_TRADED' ? 'OPEN'
+          : 'PENDING';
+        const avg = num(o.averageTradedPrice);
+        return {
+          orderId: String(o.orderId),
+          status,
+          tradingsymbol: (o.tradingSymbol ?? '').toUpperCase(),
+          side: (o.transactionType ?? 'BUY').toUpperCase() === 'SELL' ? 'SELL' : 'BUY',
+          quantity: num(o.quantity) ?? 0,
+          filledQuantity: num(o.filledQty) ?? 0,
+          averagePrice: avg !== null && avg > 0 ? avg : null,
+          message: o.omsErrorDescription?.trim() || null,
+          updatedAt: isoOrNow(o.updateTime ?? o.createTime),
+        } satisfies NormalizedOrder;
+      });
+  }
+
+  async getPositions(): Promise<NormalizedPosition[]> {
+    const rows = await this.http<Array<{
+      tradingSymbol?: string; securityId?: string; netQty?: number | string; buyAvg?: number | string;
+      costPrice?: number | string; productType?: string; exchangeSegment?: string;
+    }>>('/positions', { headers: this.headers(), throttleGroup: 'default' });
+    const out: NormalizedPosition[] = [];
+    for (const p of Array.isArray(rows) ? rows : []) {
+      const tradingsymbol = (p.tradingSymbol ?? '').trim().toUpperCase();
+      const netQty = num(p.netQty) ?? 0;
+      if (!tradingsymbol || netQty === 0) continue;
+      out.push({
+        tradingsymbol,
+        exchange: DHAN_SEGMENT_TO_EXCHANGE[(p.exchangeSegment ?? '').toUpperCase()] ?? null,
+        segment: p.exchangeSegment ?? null,
+        quantity: netQty,
+        averagePrice: num(p.buyAvg) ?? num(p.costPrice) ?? 0,
+        product: p.productType ?? null,
+      });
+    }
+    return out;
+  }
+
+  /** Fund limit as Dhan reports it. Dhan spells the field `availabelBalance`. */
+  async getFunds(): Promise<NormalizedFunds> {
+    const r = await this.http<{
+      availabelBalance?: number | string; availableBalance?: number | string; sodLimit?: number | string;
+      collateralAmount?: number | string; utilizedAmount?: number | string; withdrawableBalance?: number | string;
+    }>('/fundlimit', { headers: this.headers(), throttleGroup: 'default' });
+    const availableCash = num(r.availabelBalance) ?? num(r.availableBalance);
+    if (availableCash === null) throw new ProviderError('dhan', 'Fund limit reply had no available balance figure', { retryable: true });
+    const used = num(r.utilizedAmount);
+    return {
+      availableCash, net: used === null ? null : availableCash + used, utilised: used,
+      collateral: num(r.collateralAmount), m2mUnrealised: null, m2mRealised: null, fetchedAt: new Date().toISOString(),
+    };
+  }
+
   async getInstruments(): Promise<NormalizedInstrument[]> {
     if (this.scripCache && Date.now() - this.scripCache.at < 3600_000) {
       return this.scripCache.rows;
@@ -542,66 +663,125 @@ const DHAN_SEGMENT_TO_EXCHANGE: Record<string, Exchange> = {
   BSE_FNO: 'BFO',
   MCX_COMM: 'MCX',
   NSE_CURRENCY: 'CDS',
+  BSE_CURRENCY: 'CDS',
   IDX_I: 'INDICES',
 };
+
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+/**
+ * Dhan's detailed scrip master (`api-scrip-master-detailed.csv`) has no
+ * exchange-segment or trading-symbol column. The segment is EXCH_ID plus the
+ * one-letter SEGMENT (E equity, D derivatives, C currency, M commodity,
+ * I index), and SYMBOL_NAME is only unique on NSE derivatives: BSE options
+ * all read "BSXOPT" and MCX futures repeat the underlying. Derivative
+ * symbols are therefore built here in Dhan's own NSE spelling
+ * (BANKNIFTY-Oct2026-71900-CE, NIFTY-Oct2026-FUT) so every contract gets a
+ * unique row and NSE rows match what Dhan itself prints.
+ */
+export function dhanSegment(exchId: string, segment: string): string | null {
+  const ex = exchId.trim().toUpperCase();
+  const seg = segment.trim().toUpperCase();
+  if (seg === 'I') return 'IDX_I';
+  if (ex === 'NSE') return seg === 'E' ? 'NSE_EQ' : seg === 'D' ? 'NSE_FNO' : seg === 'C' ? 'NSE_CURRENCY' : null;
+  if (ex === 'BSE') return seg === 'E' ? 'BSE_EQ' : seg === 'D' ? 'BSE_FNO' : seg === 'C' ? 'BSE_CURRENCY' : null;
+  if (ex === 'MCX') return seg === 'M' ? 'MCX_COMM' : null;
+  return null;
+}
+
+function formatStrike(strike: number): string {
+  return Number.isInteger(strike) ? String(strike) : String(Number(strike.toFixed(2)));
+}
+
+export function dhanDerivativeSymbol(
+  underlying: string,
+  expiry: string,
+  strike: number | null,
+  optionType: 'CE' | 'PE' | null,
+): string {
+  const [y, m] = expiry.split('-');
+  const mon = `${MONTHS[Number(m) - 1] ?? m}${y}`;
+  const base = `${underlying.toUpperCase()}-${mon}`;
+  return optionType && strike !== null ? `${base}-${formatStrike(strike)}-${optionType}` : `${base}-FUT`;
+}
 
 export function parseDhanScripMaster(csv: string): NormalizedInstrument[] {
   const lines = csv.split(/\r?\n/).filter((l) => l.trim().length > 0);
   if (lines.length < 2) return [];
 
   const header = splitCsvLine(lines[0]!).map((h) => h.trim().toUpperCase());
-  const col = (name: string) => header.indexOf(name);
+  const col = (...names: string[]) => {
+    for (const n of names) { const i = header.indexOf(n); if (i >= 0) return i; }
+    return -1;
+  };
+  const cell = (f: string[], i: number) => (i >= 0 ? (f[i] ?? '').trim() : '');
 
-  const iSecId = col('SECURITY_ID');
-  const iSegment = col('EXCH_ID') >= 0 ? col('EXCH_ID') : col('SEGMENT');
-  const iSymbol = col('UNDERLYING_SYMBOL') >= 0 ? col('UNDERLYING_SYMBOL') : col('SYMBOL_NAME');
-  const iDisplay = col('DISPLAY_NAME');
-  const iTrading = col('TRADING_SYMBOL') >= 0 ? col('TRADING_SYMBOL') : col('SEM_TRADING_SYMBOL');
+  const iSecId = col('SECURITY_ID', 'SEM_SMST_SECURITY_ID');
+  const iExch = col('EXCH_ID', 'SEM_EXM_EXCH_ID');
+  const iSeg = col('SEGMENT', 'SEM_SEGMENT');
+  const iUnderlying = col('UNDERLYING_SYMBOL', 'SM_SYMBOL_NAME');
+  const iSymbolName = col('SYMBOL_NAME', 'SEM_TRADING_SYMBOL');
+  const iDisplay = col('DISPLAY_NAME', 'SEM_CUSTOM_SYMBOL');
   const iIsin = col('ISIN');
-  const iInstr = col('INSTRUMENT');
-  const iExpiry = col('SM_EXPIRY_DATE') >= 0 ? col('SM_EXPIRY_DATE') : col('EXPIRY_DATE');
-  const iStrike = col('STRIKE_PRICE');
-  const iOptType = col('OPTION_TYPE');
-  const iLot = col('LOT_SIZE');
-  const iTick = col('TICK_SIZE');
-  const iExchSeg = col('EXCHANGE_SEGMENT') >= 0 ? col('EXCHANGE_SEGMENT') : iSegment;
+  const iInstr = col('INSTRUMENT', 'SEM_INSTRUMENT_NAME');
+  const iExpiry = col('SM_EXPIRY_DATE', 'SEM_EXPIRY_DATE');
+  const iStrike = col('STRIKE_PRICE', 'SEM_STRIKE_PRICE');
+  const iOptType = col('OPTION_TYPE', 'SEM_OPTION_TYPE');
+  const iLot = col('LOT_SIZE', 'SEM_LOT_UNITS');
+  const iTick = col('TICK_SIZE', 'SEM_TICK_SIZE');
+  if (iSecId < 0 || iExch < 0 || iSeg < 0) return [];
 
   const out: NormalizedInstrument[] = [];
+  const seen = new Set<string>();
 
   for (let i = 1; i < lines.length; i += 1) {
     const f = splitCsvLine(lines[i]!);
-    const securityId = f[iSecId]?.trim();
-    const tradingsymbol = (f[iTrading] ?? f[iSymbol] ?? '').trim().toUpperCase();
-    if (!securityId || !tradingsymbol) continue;
+    const securityId = cell(f, iSecId);
+    if (!securityId) continue;
 
-    const segRaw = (f[iExchSeg] ?? '').trim().toUpperCase();
-    const exchange = DHAN_SEGMENT_TO_EXCHANGE[segRaw];
-    if (!exchange) continue;
+    const segRaw = dhanSegment(cell(f, iExch), cell(f, iSeg));
+    const exchange = segRaw ? DHAN_SEGMENT_TO_EXCHANGE[segRaw] : undefined;
+    if (!segRaw || !exchange) continue;
 
-    const instrRaw = (f[iInstr] ?? '').trim().toUpperCase();
-    const optType = (f[iOptType] ?? '').trim().toUpperCase();
+    const instrRaw = cell(f, iInstr).toUpperCase();
+    const optType = cell(f, iOptType).toUpperCase();
+    const optionType: 'CE' | 'PE' | null = optType === 'CE' || optType === 'PE' ? optType : null;
     let instrumentType: InstrumentType = 'EQ';
-    if (instrRaw.includes('INDEX')) instrumentType = 'INDEX';
+    if (instrRaw.includes('INDEX') || segRaw === 'IDX_I') instrumentType = 'INDEX';
+    else if (optionType) instrumentType = optionType;
     else if (instrRaw.startsWith('FUT')) instrumentType = 'FUT';
-    else if (optType === 'CE' || optType === 'PE') instrumentType = optType;
     else if (instrRaw === 'ETF') instrumentType = 'ETF';
 
-    const expiryRaw = (f[iExpiry] ?? '').trim();
-    const expiry = expiryRaw && expiryRaw !== '0' ? expiryRaw.slice(0, 10) : null;
+    const expiryRaw = cell(f, iExpiry).slice(0, 10);
+    const expiry = /^\d{4}-\d{2}-\d{2}$/.test(expiryRaw) && Number(expiryRaw.slice(0, 4)) >= 1990 ? expiryRaw : null;
+    const strike = optionType ? num(cell(f, iStrike)) : null;
+    const underlying = cell(f, iUnderlying).toUpperCase() || null;
+
+    const isDerivative = instrumentType === 'FUT' || optionType !== null;
+    let tradingsymbol: string;
+    if (isDerivative && underlying && expiry) {
+      tradingsymbol = dhanDerivativeSymbol(underlying, expiry, strike, optionType);
+    } else {
+      tradingsymbol = (underlying ?? cell(f, iSymbolName)).toUpperCase();
+    }
+    if (!tradingsymbol) continue;
+    const key = `${exchange}:${tradingsymbol}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
 
     out.push({
       exchange,
       tradingsymbol,
-      name: (f[iDisplay] ?? f[iSymbol] ?? '').trim() || null,
-      isin: (f[iIsin] ?? '').trim() || null,
-      segment: segRaw || null,
+      name: cell(f, iDisplay) || cell(f, iSymbolName) || null,
+      isin: cell(f, iIsin).replace(/^NA$/i, '') || null,
+      segment: segRaw,
       instrumentType,
-      underlying: (f[iSymbol] ?? '').trim().toUpperCase() || null,
+      underlying,
       expiry,
-      strike: num(f[iStrike]),
-      optionType: optType === 'CE' || optType === 'PE' ? optType : null,
-      lotSize: num(f[iLot]) ?? 1,
-      tickSize: num(f[iTick]) ?? 0.05,
+      strike,
+      optionType,
+      lotSize: num(cell(f, iLot)) ?? 1,
+      tickSize: num(cell(f, iTick)) ?? 0.05,
       providerToken: securityId,
     });
   }

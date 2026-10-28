@@ -4,14 +4,15 @@ import { fileURLToPath, URL } from 'node:url';
 
 export default defineConfig({
   plugins: [react()],
-  server: {
-    allowedHosts: ['.trycloudflare.com']
-  },
   resolve: {
     alias: { '@': fileURLToPath(new URL('./src', import.meta.url)) },
   },
   server: {
     port: 5173,
+    // Vite refuses requests whose Host header is not localhost unless the
+    // host is listed here. Tunnels (ngrok, Cloudflare) change their name on
+    // every restart, so allow the whole domain rather than one subdomain.
+    allowedHosts: ['.ngrok-free.dev', '.ngrok-free.app', '.ngrok.app', '.trycloudflare.com'],
     // Proxy keeps the browser same-origin in dev, so the refresh cookie
     // (path /api/auth, SameSite=Lax) is sent without CORS credential fuss.
     proxy: {

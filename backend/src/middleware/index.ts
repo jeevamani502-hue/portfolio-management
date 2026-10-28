@@ -239,6 +239,9 @@ export const allowTokensInResponse: RequestHandler = (_req, res, next) => {
  */
 function scrub(value: unknown, depth = 0): unknown {
   if (depth > 12 || value === null || typeof value !== 'object') return value;
+  // A Date has no enumerable keys; walking it would turn every timestamp
+  // into `{}` and the browser would show "Invalid Date".
+  if (value instanceof Date) return value;
   if (Array.isArray(value)) return value.map((v) => scrub(v, depth + 1));
 
   const out: Record<string, unknown> = {};

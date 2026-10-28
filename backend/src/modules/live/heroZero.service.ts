@@ -149,7 +149,7 @@ export async function executeHeroZero(
 
   const registry = await registryForUser(userId);
   let broker;
-  try { broker = brokerFor(registry); } catch (err) { return none((err as Error).message); }
+  try { broker = brokerFor(registry, cfg.broker); } catch (err) { return none((err as Error).message); }
 
   const { capital } = await refreshCapital(userId);
   if (!(capital > 0)) return none('The broker reports no available cash to trade with.');

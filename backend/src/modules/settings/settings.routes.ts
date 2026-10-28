@@ -25,6 +25,8 @@ import { DhanProvider } from '../../providers/dhan/index.js';
 import { KiteProvider } from '../../providers/kite/index.js';
 import { AngelOneProvider } from '../../providers/angelone/index.js';
 import { NsePublicProvider } from '../../providers/nsepublic/index.js';
+import { syncInstruments } from '../../workers/jobs/instrumentsSync.js';
+import { logger } from '../../utils/logger.js';
 import { GrowwProvider } from '../../providers/groww/index.js';
 import { EodhdProvider } from '../../providers/fundamentals/eodhd.js';
 import { RssNewsProvider } from '../../providers/news/rss.js';
@@ -320,12 +322,25 @@ settingsRouter.post(
 
     invalidateUserRegistry(req.user!.id);
 
+    // A broker that publishes its own instrument master needs its ids in the
+    // instruments table before it can quote or place an order. The worker
+    // re-syncs every 12 hours; a fresh connection should not wait that long.
+    let syncNote: string | null = null;
+    if (b.isEnabled && manifest?.capabilities.includes('instruments')) {
+      syncNote = `${manifest.displayName} instrument list is downloading in the background; orders can use it in a few minutes.`;
+      const userId = req.user!.id;
+      void registryForUser(userId)
+        .then((registry) => syncInstruments(registry, { only: [b.provider] }))
+        .catch((err) => logger.error({ err, provider: b.provider, userId }, 'Instrument sync after saving credentials failed'));
+    }
+
     respond(res, {
       id: row!.id,
       provider: b.provider,
       saved: true,
       storedFields: Object.keys(merged),
       note: 'Credentials were encrypted before storage and are not returned by any endpoint.',
+      syncNote,
     }, {}, 201);
   }),
 );

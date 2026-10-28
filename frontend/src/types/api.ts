@@ -1310,6 +1310,7 @@ export interface LiveConfigDto {
   stop_atr_multiple: string;
   target1_r: string;
   target2_r: string;
+  broker: 'auto' | 'angelone' | 'groww' | 'kite' | 'dhan';
   kill_switch: boolean;
   halted_reason: string | null;
   halted_at: string | null;
@@ -1340,6 +1341,7 @@ export interface LiveConfigInput {
   stopAtrMultiple: number;
   target1R: number;
   target2R: number;
+  broker: 'auto' | 'angelone' | 'groww' | 'kite' | 'dhan';
   riskPerTradePct: number;
   maxOpenPositions: number;
   maxLotsPerTrade: number;
@@ -1384,6 +1386,11 @@ export interface LiveStatusDto {
   marketPhase: string;
   brokerReady: boolean;
   broker: string | null;
+  brokerChoice: string;
+  brokerProblem: string | null;
+  brokers: Array<{ id: string; displayName: string; configured: boolean; canOrder: boolean }>;
+  publicIp: string | null;
+  ipRejection: { broker: string; ip: string | null; at: string } | null;
   headline: string;
 }
 

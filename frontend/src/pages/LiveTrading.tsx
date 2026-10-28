@@ -501,6 +501,7 @@ function BrokerBalance({ funds, loading, error, onRefresh, refreshing }: {
 function SettingsCard({ status: s, onSaved }: { status: LiveStatusDto; onSaved: () => void }) {
   const c: LiveConfigDto | null = s.config;
   const [mode, setMode] = useState<LiveMode>(c?.mode ?? 'OFF');
+  const [brokerChoice, setBrokerChoice] = useState<'auto' | 'angelone' | 'groww' | 'kite' | 'dhan'>(c?.broker ?? 'auto');
   const [risk, setRisk] = useState(c ? String(Number(c.risk_per_trade_pct)) : '1');
   const [maxLots, setMaxLots] = useState(String(c?.max_lots_per_trade ?? 1));
   const [maxOpen, setMaxOpen] = useState(String(c?.max_open_positions ?? 1));
@@ -530,7 +531,7 @@ function SettingsCard({ status: s, onSaved }: { status: LiveStatusDto; onSaved: 
       mode, riskPerTradePct: Number(risk), maxLotsPerTrade: Number(maxLots), maxOpenPositions: Number(maxOpen),
       maxTradesPerDay: Number(maxDay), maxDailyLossPct: Number(lossCap), entryTimeoutSec: Number(timeout),
       windowStartMin: fromHHMM(windowStart), windowEndMin: fromHHMM(windowEnd), squareOffMin: fromHHMM(squareOff),
-      minGrade, product, scaleOut, allowExpiryDay: allowExpiry, horizon, directionGuard: guard,
+      minGrade, product, scaleOut, allowExpiryDay: allowExpiry, horizon, directionGuard: guard, broker: brokerChoice,
       requireTimingAgreement: timingGates, requireNamedSetup: namedSetup, reentryCooldownMin: Number(cooldown),
       cutLoserAtR: Number(cutLoser), stopAtrMultiple: Number(stopAtr), target1R: Number(t1), target2R: Number(t2),
       underlyings: underlyings.split(',').map((u) => u.trim().toUpperCase()).filter(Boolean),
@@ -557,6 +558,25 @@ function SettingsCard({ status: s, onSaved }: { status: LiveStatusDto; onSaved: 
       <CardContent className="space-y-4">
         <BrokerBalance funds={funds.data ?? null} loading={funds.isLoading} error={funds.error} onRefresh={() => void funds.refetch()} refreshing={funds.isFetching} />
         <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4">
+          <div className="space-y-1">
+            <Label htmlFor="live-broker">Which broker places the orders</Label>
+            <Select id="live-broker" value={brokerChoice} onChange={(e) => setBrokerChoice(e.target.value as 'auto' | 'angelone' | 'groww' | 'kite' | 'dhan')}>
+              <option value="auto">Automatic — first connected broker that can place orders</option>
+              {s.brokers.map((b) => (
+                <option key={b.id} value={b.id} disabled={!b.configured || !b.canOrder}>
+                  {b.displayName}{!b.configured ? ' — not connected in Settings' : !b.canOrder ? ' — orders not supported in this app yet' : ' — ready'}
+                </option>
+              ))}
+            </Select>
+            {s.brokerProblem && <p className="text-2xs text-destructive">{s.brokerProblem}</p>}
+            <p className="text-2xs text-muted-foreground">
+              Orders go out from this computer's internet address: <span className="font-mono">{s.publicIp ?? 'not known yet'}</span>.
+              Angel One, Groww and Dhan only accept orders from an address registered on your API key.
+              {s.ipRejection && (
+                <span className="text-destructive"> The last order was refused because {s.ipRejection.ip ?? 'this address'} is not registered{s.publicIp && s.ipRejection.ip && s.publicIp !== s.ipRejection.ip ? `; your address has since changed to ${s.publicIp}` : ''}.</span>
+              )}
+            </p>
+          </div>
           <div className="space-y-1">
             <Label htmlFor="live-mode">How should it trade?</Label>
             <Select id="live-mode" value={mode} onChange={(e) => setMode(e.target.value as LiveMode)}>

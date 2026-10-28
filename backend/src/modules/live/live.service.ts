@@ -19,6 +19,7 @@
  * graded and the journal measures. The track record is the only claim.
  */
 import { query, queryRows, queryOne } from '../../db/pool.js';
+import { publicIp } from '../../utils/publicIp.js';
 import { logger } from '../../utils/logger.js';
 import { registryForUser, type ProviderRegistry } from '../../providers/registry.js';
 import type { MarketDataProvider, NormalizedOrder, NormalizedFunds } from '../../providers/types.js';
@@ -82,6 +83,7 @@ export interface LiveConfigRow {
   stop_atr_multiple: string;
   target1_r: string;
   target2_r: string;
+  broker: string;
   kill_switch: boolean;
   halted_reason: string | null;
   halted_at: Date | null;
@@ -126,6 +128,7 @@ export interface LiveConfigPatch {
   stopAtrMultiple?: number;
   target1R?: number;
   target2R?: number;
+  broker?: string;
 }
 
 export async function getLiveConfig(userId: string): Promise<LiveConfigRow | null> {
@@ -186,6 +189,7 @@ export async function upsertLiveConfig(userId: string, p: LiveConfigPatch): Prom
        stop_atr_multiple = COALESCE($35, stop_atr_multiple),
        target1_r = COALESCE($36, target1_r),
        target2_r = COALESCE($37, target2_r),
+       broker = COALESCE($38, broker),
        updated_at = now()
      WHERE user_id = $1`,
     [
@@ -199,7 +203,7 @@ export async function upsertLiveConfig(userId: string, p: LiveConfigPatch): Prom
       p.heroZeroWindowEndMin ?? null, p.heroZeroSquareOffMin ?? null, p.heroZeroStopPct ?? null,
       p.heroZeroTargetMultiple ?? null, p.heroZeroMinAgree ?? null, p.horizon ?? null, p.directionGuard ?? null,
       p.requireTimingAgreement ?? null, p.requireNamedSetup ?? null, p.reentryCooldownMin ?? null, p.cutLoserAtR ?? null,
-      p.stopAtrMultiple ?? null, p.target1R ?? null, p.target2R ?? null,
+      p.stopAtrMultiple ?? null, p.target1R ?? null, p.target2R ?? null, p.broker ?? null,
     ],
   );
   return (await getLiveConfig(userId))!;
@@ -218,8 +222,15 @@ export interface LiveFunds extends NormalizedFunds {
  */
 export async function brokerFunds(userId: string): Promise<LiveFunds> {
   const registry = await registryForUser(userId);
-  const broker = registry.candidates('funds')[0];
-  if (!broker?.getFunds) throw new Error('No configured broker reports account funds. Connect Angel One in Settings.');
+  const cfg = await getLiveConfig(userId);
+  let broker: MarketDataProvider | undefined;
+  if (cfg?.broker && cfg.broker !== 'auto') {
+    broker = registry.all().find((p) => p.manifest.id === cfg.broker && p.isConfigured() && typeof p.getFunds === 'function');
+    if (!broker) throw new Error(`${cfg.broker} is not connected, or this app cannot read its balance.`);
+  } else {
+    broker = registry.candidates('funds')[0];
+  }
+  if (!broker?.getFunds) throw new Error('No connected broker reports account funds. Connect Angel One, Groww or Dhan in Settings.');
   const funds = await broker.getFunds();
   return { ...funds, broker: broker.manifest.id };
 }
@@ -333,6 +344,13 @@ export async function blockersFor(userId: string, cfg: LiveConfigRow, daysToExpi
 
 export interface LiveStatus {
   config: LiveConfigRow | null;
+  brokerChoice: string;
+  brokerProblem: string | null;
+  brokers: Array<{ id: string; displayName: string; configured: boolean; canOrder: boolean }>;
+  /** The address brokers see orders coming from; it must be registered on the broker's API key. */
+  publicIp: string | null;
+  /** Set when the most recent failed order today was refused for an unregistered IP. */
+  ipRejection: { broker: string; ip: string | null; at: Date } | null;
   armed: boolean;
   blockers: LiveBlocker[];
   openPositions: number;
@@ -346,11 +364,17 @@ export interface LiveStatus {
 
 export async function getLiveStatus(userId: string): Promise<LiveStatus> {
   const cfg = await getLiveConfig(userId);
-  const [state, market, registry] = await Promise.all([liveState(userId), marketStatus(), registryForUser(userId)]);
-  const broker = registry.candidates('orders')[0] ?? null;
+  const [state, market, registry, ip, ipRejection] = await Promise.all([
+    liveState(userId), marketStatus(), registryForUser(userId), publicIp(), lastIpRejection(userId),
+  ]);
+  let broker: MarketDataProvider | null = null;
+  let brokerProblem: string | null = null;
+  try { broker = brokerFor(registry, cfg?.broker ?? 'auto'); } catch (err) { brokerProblem = (err as Error).message; }
   const base = {
     openPositions: state.openPositions, tradesToday: state.tradesToday, netPnlToday: state.netPnlToday,
     marketPhase: market.phase, brokerReady: broker !== null, broker: broker?.manifest.id ?? null,
+    brokerChoice: cfg?.broker ?? 'auto', brokerProblem, brokers: brokerChoices(registry),
+    publicIp: ip, ipRejection,
   };
   if (!cfg) {
     return {
@@ -360,8 +384,15 @@ export async function getLiveStatus(userId: string): Promise<LiveStatus> {
     };
   }
   const blockers = liveBlockers(guardConfig(cfg), { ...state, marketPhase: market.phase, now: new Date(), daysToExpiry: null });
+  if (ipRejection && broker && ipRejection.broker === broker.manifest.id) {
+    blockers.unshift({
+      code: 'ip_not_registered',
+      detail: `${broker.manifest.displayName} refused the last order because ${ipRejection.ip ?? 'this machine\'s IP'} is not registered on your API key.`,
+      fix: `Register ${ip ?? 'your current public IP'} on the ${broker.manifest.displayName} API key, then re-arm. Your home IP can change; a server with a fixed IP avoids this.`,
+    });
+  }
   if (!broker) {
-    blockers.unshift({ code: 'no_broker', detail: 'No configured broker can place orders. Angel One is the only adapter with order routing.', fix: 'Settings → Market data providers.' });
+    blockers.unshift({ code: 'no_broker', detail: brokerProblem ?? 'No connected broker can place orders.', fix: 'Live settings → Which broker places orders, and Settings → Market data providers.' });
   }
   const armed = cfg.armed_until !== null && cfg.armed_until.getTime() > Date.now();
   const headline =
@@ -376,12 +407,49 @@ export async function getLiveStatus(userId: string): Promise<LiveStatus> {
   return { ...base, config: cfg, armed, blockers, headline };
 }
 
+/**
+ * The most recent failed order today that a broker refused for an
+ * unregistered IP, so the page can say which address to register instead of
+ * the user digging it out of a trade row.
+ */
+async function lastIpRejection(userId: string): Promise<LiveStatus['ipRejection']> {
+  const row = await queryOne<{ broker: string; failure_reason: string; created_at: Date }>(
+    `SELECT broker, failure_reason, created_at FROM live_trades
+      WHERE user_id = $1 AND status = 'FAILED'
+        AND created_at::date = CURRENT_DATE
+        AND failure_reason ILIKE '%registered IP%'
+      ORDER BY created_at DESC LIMIT 1`,
+    [userId],
+  );
+  if (!row) return null;
+  const ip = /(\d+\.\d+\.\d+\.\d+)/.exec(row.failure_reason)?.[1] ?? null;
+  return { broker: row.broker, ip, at: row.created_at };
+}
+
 // ── broker plumbing ─────────────────────────────────────────────────────────
 
-export function brokerFor(registry: ProviderRegistry): MarketDataProvider {
+/**
+ * The broker that places this user's orders: the one chosen in Live settings,
+ * or with 'auto' the first connected broker that can place orders.
+ */
+export function brokerFor(registry: ProviderRegistry, choice: string = 'auto'): MarketDataProvider {
+  if (choice && choice !== 'auto') {
+    const p = registry.all().find((x) => x.manifest.id === choice);
+    if (!p) throw new Error(`${choice} is not a known broker.`);
+    if (!p.isConfigured()) throw new Error(`${p.manifest.displayName} is not connected in Settings → Market data providers.`);
+    if (typeof p.placeOrder !== 'function') throw new Error(`This app cannot place orders through ${p.manifest.displayName} yet. Choose Angel One, Groww or Dhan.`);
+    return p;
+  }
   const broker = registry.candidates('orders')[0];
-  if (!broker) throw new Error('No configured broker can place orders.');
+  if (!broker) throw new Error('No connected broker can place orders. Connect Angel One, Groww or Dhan in Settings.');
   return broker;
+}
+
+/** Every provider, with whether it is connected and whether this app can route orders through it. */
+export function brokerChoices(registry: ProviderRegistry): Array<{ id: string; displayName: string; configured: boolean; canOrder: boolean }> {
+  return registry.all().map((p) => ({
+    id: p.manifest.id, displayName: p.manifest.displayName, configured: p.isConfigured(), canOrder: typeof p.placeOrder === 'function',
+  }));
 }
 
 async function logBroker(tradeId: number, entry: Record<string, unknown>): Promise<void> {
@@ -515,7 +583,7 @@ export async function executeLive(
 
   const registry = await registryForUser(userId);
   let broker: MarketDataProvider;
-  try { broker = brokerFor(registry); } catch (err) { return none((err as Error).message); }
+  try { broker = brokerFor(registry, cfg.broker); } catch (err) { return none((err as Error).message); }
 
   // Size from the account as it is right now, not as it was this morning.
   const { capital } = await refreshCapital(userId);
@@ -743,8 +811,8 @@ export async function syncLiveOrders(userId: string, registry?: ProviderRegistry
   );
   if (pending.length === 0) return;
   const reg = registry ?? (await registryForUser(userId));
-  const broker = brokerFor(reg);
   const cfg = await getLiveConfig(userId);
+  const broker = brokerFor(reg, cfg?.broker ?? 'auto');
   const book = new Map<string, NormalizedOrder>((await broker.getOrders!()).map((o) => [o.orderId, o]));
 
   for (const t of pending) {
@@ -836,7 +904,7 @@ export async function reconcileWithBroker(userId: string, registry?: ProviderReg
   );
   if (open.length === 0) return 0;
   const reg = registry ?? (await registryForUser(userId));
-  const broker = brokerFor(reg);
+  const broker = brokerFor(reg, (await getLiveConfig(userId))?.broker ?? 'auto');
   if (!broker.getPositions || !broker.getOrders) return 0;
 
   let positions: Awaited<ReturnType<NonNullable<MarketDataProvider['getPositions']>>>;
@@ -956,8 +1024,8 @@ export async function manageLiveExits(userId: string, registry?: ProviderRegistr
   );
   if (open.length === 0) return;
   const reg = registry ?? (await registryForUser(userId));
-  const broker = brokerFor(reg);
   const cfg = await getLiveConfig(userId);
+  const broker = brokerFor(reg, cfg?.broker ?? 'auto');
   const squareOffMin = cfg?.square_off_min ?? 915;
   const spots = new Map<string, number | null>();
 
@@ -1045,7 +1113,7 @@ export async function closeLive(userId: string, tradeId: number): Promise<{ ok: 
   );
   if (!t) return { ok: false, reason: 'Trade not found.' };
   const registry = await registryForUser(userId);
-  const broker = brokerFor(registry);
+  const broker = brokerFor(registry, (await getLiveConfig(userId))?.broker ?? 'auto');
   if (t.status === 'PENDING' && t.entry_order_id) {
     await broker.cancelOrder!(t.entry_order_id);
     await logBroker(tradeId, { event: 'entry_cancelled_by_user' });
@@ -1073,7 +1141,7 @@ export async function killSwitch(userId: string): Promise<{ cancelled: number; e
     `SELECT ${TRADE_SELECT} FROM live_trades WHERE user_id = $1 AND status IN ('PENDING','OPEN')`, [userId],
   );
   const registry = await registryForUser(userId);
-  const broker = brokerFor(registry);
+  const broker = brokerFor(registry, (await getLiveConfig(userId))?.broker ?? 'auto');
   let cancelled = 0;
   let exits = 0;
   for (const t of active) {

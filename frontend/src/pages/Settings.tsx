@@ -35,6 +35,7 @@ export function Settings() {
 
 function ProvidersTab() {
   const [editing, setEditing] = useState<string | null>(null);
+  const [savedNote, setSavedNote] = useState<string | null>(null);
   const qc = useQueryClient();
 
   const catalogue = useQuery({
@@ -155,8 +156,11 @@ function ProvidersTab() {
                   </div>
                 )}
 
+                {editing !== p.id && savedNote && savedNote.startsWith(p.displayName) && (
+                  <Alert variant="info">{savedNote}</Alert>
+                )}
                 {editing === p.id ? (
-                  <ProviderForm provider={p} onDone={() => setEditing(null)} />
+                  <ProviderForm provider={p} onDone={(note) => { setEditing(null); setSavedNote(note); }} />
                 ) : (
                   <div className="flex flex-wrap gap-2">
                     <Button size="sm" variant="outline" onClick={() => setEditing(p.id)}>
@@ -219,7 +223,7 @@ function ProviderForm({
   onDone,
 }: {
   provider: ProviderCatalogueDto;
-  onDone: () => void;
+  onDone: (note: string | null) => void;
 }) {
   const [values, setValues] = useState<Record<string, string>>({});
   const qc = useQueryClient();
@@ -231,9 +235,9 @@ function ProviderForm({
         credentials: values,
         isEnabled: true,
       }),
-    onSuccess: () => {
+    onSuccess: (r) => {
       void qc.invalidateQueries({ queryKey: ['settings', 'providers'] });
-      onDone();
+      onDone(r.syncNote ?? null);
     },
   });
 
@@ -244,7 +248,7 @@ function ProviderForm({
           This source needs no credentials, but it is disabled by default and must be enabled with
           the NSE_PUBLIC_ENABLED environment variable. Read the notes above before doing so.
         </Alert>
-        <Button size="sm" variant="ghost" onClick={onDone}>Close</Button>
+        <Button size="sm" variant="ghost" onClick={() => onDone(null)}>Close</Button>
       </div>
     );
   }
@@ -274,7 +278,7 @@ function ProviderForm({
         <Button type="submit" size="sm" disabled={save.isPending}>
           {save.isPending ? 'Saving…' : 'Save'}
         </Button>
-        <Button type="button" size="sm" variant="ghost" onClick={onDone}>Cancel</Button>
+        <Button type="button" size="sm" variant="ghost" onClick={() => onDone(null)}>Cancel</Button>
       </div>
       {save.isError && <Alert variant="error">{(save.error as Error).message}</Alert>}
       <p className="text-2xs text-muted-foreground">
